@@ -11,8 +11,6 @@ filesystem_size = 3000
 [packages]
 
 # GUI Apps
-cosmic-monitor = {}
-cosmic-reader = {}
 periodictable = {}
 servo = {}
 webkitgtk3 = {}
@@ -50,7 +48,6 @@ pixelcannon = {}
 rodioplay = {}
 gears = {}
 sdl2-gears = {}
-iced = {}
 ratatui = {}
 softbuffer = {}
 

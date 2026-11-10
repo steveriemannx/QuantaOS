@@ -4,6 +4,10 @@
 
 This repository is the **Build System** for Redox OS.
 
+> **QuantaOS fork**: this branch targets a default desktop image that is entirely Rust and MIT-licensed, using [FerriticUI] as the GUI toolkit instead of COSMIC/iced. See [QUANTAOS.md](./QUANTAOS.md).
+
+[FerriticUI]: https://github.com/steveriemannx/FerriticUI
+
 Redox is under active development by a vibrant community, you can see the key links below:
 
 - [The **main website** for Redox OS](https://www.redox-os.org).
@@ -14,7 +18,7 @@ Redox is under active development by a vibrant community, you can see the key li
 
 [Redox](https://www.redox-os.org) is an open-source operating system written in Rust, a language with focus on safety, efficiency and high performance. Redox uses a microkernel architecture, and aims to be reliable, secure, usable, correct, and free. Redox is inspired by previous operating systems, such as seL4, MINIX, Plan 9, Linux and BSD.
 
-Redox _is not_ just a kernel, it's a **full-featured operating system**, providing components (file system, display server, core utilities, etc.) that together make up a functional and convenient operating system. Redox uses the COSMIC desktop apps, and provides source code compatibility with many Rust, Linux and BSD programs.
+Redox _is not_ just a kernel, it's a **full-featured operating system**, providing components (file system, display server, core utilities, etc.) that together make up a functional and convenient operating system. The QuantaOS branch uses FerriticUI for its desktop stack, and provides source code compatibility with many Rust, Linux and BSD programs.
 
 [![MIT licensed](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
@@ -54,9 +58,6 @@ Some of the key repositories on the Redox GitLab:
 See [Redox in Action](https://www.redox-os.org/screens/) for photos and videos.
 
 <img alt="Redox" height="150" src="https://gitlab.redox-os.org/redox-os/website/-/raw/master/static/img/screenshot/orbital-visual.png">
-<img alt="Redox" height="150" src="https://gitlab.redox-os.org/redox-os/website/-/raw/master/static/img/screenshot/cosmic-programs.png">
-<img alt="Redox" height="150" src="https://gitlab.redox-os.org/redox-os/website/-/raw/master/static/img/screenshot/cosmic-term-screenfetch.png">
 
-<img alt="Redox" height="150" src="https://gitlab.redox-os.org/redox-os/website/-/raw/master/static/img/screenshot/cosmic-edit-redox.png">
 <img alt="Redox" height="150" src="https://gitlab.redox-os.org/redox-os/website/-/raw/master/static/img/screenshot/image-viewer.png">
 <img alt="Redox" height="150" src="https://gitlab.redox-os.org/redox-os/assets/raw/master/screenshots/Boot.png">

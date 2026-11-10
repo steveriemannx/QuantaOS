@@ -9,5 +9,4 @@ filesystem_size = 1536
 
 # Package settings
 [packages]
-cosmic-reader = {}
 rustconf2025 = {}

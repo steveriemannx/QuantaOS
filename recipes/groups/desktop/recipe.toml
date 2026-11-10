@@ -2,10 +2,6 @@
 [package]
 dependencies = [
     "server",
-    "cosmic-edit",
-    "cosmic-files",
-    "cosmic-icons",
-    "cosmic-term",
     "dejavu",
     "file",
     "freefont",
