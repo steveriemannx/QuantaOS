@@ -3,6 +3,10 @@
 Fork of the Redox OS build system. Goal: an operating system whose **default desktop
 image is entirely Rust and MIT-licensed**.
 
+QuantaOS is its own project repository (`github.com/steveriemannx/QuantaOS`, project
+home and overview); the `quantaos` branch of this fork is its incremental
+implementation.
+
 ## Decisions
 
 | Topic | Decision |
