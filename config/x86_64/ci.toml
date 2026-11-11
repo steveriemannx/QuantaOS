@@ -151,6 +151,7 @@ libuuid = {}
 liburcu = {}
 libuv = {}
 libvorbis = {}
+libvulkan = {}
 libwebp = {}
 libxkbcommon = {}
 libxcursor = {}

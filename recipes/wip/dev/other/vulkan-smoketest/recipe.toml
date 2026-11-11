@@ -1,0 +1,22 @@
+[package]
+description = "Minimal Vulkan loader smoke test (dlopen + instance/device enumeration)"
+
+[build]
+template = "custom"
+# Runtime: the loader is opened with dlopen(), like blade/ash does.
+dependencies = [
+    "libvulkan",
+]
+# Build-time only: vulkan.h.
+dev-dependencies = [
+    "vulkan-headers",
+]
+script = """
+DYNAMIC_INIT
+
+"${TARGET}-gcc" -O2 -I"${COOKBOOK_SYSROOT}/include" \
+    -o vulkan-smoketest "${COOKBOOK_SOURCE}/main.c"
+
+install -D -m 755 vulkan-smoketest \
+    "${COOKBOOK_STAGE}/usr/bin/vulkan-smoketest"
+"""

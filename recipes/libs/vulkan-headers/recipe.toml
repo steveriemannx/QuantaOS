@@ -1,0 +1,13 @@
+[package]
+description = "Vulkan API headers and registry"
+
+[source]
+tar = "https://codeload.github.com/KhronosGroup/Vulkan-Headers/tar.gz/refs/tags/vulkan-sdk-1.4.350.1"
+blake3 = "828a855e5c680d595ab50803c51c3b73b9863c8a7749b19cd9a5face6fd5de61"
+
+[build]
+template = "cmake"
+cmakeflags = [
+    "-DVULKAN_HEADERS_ENABLE_TESTS=OFF",
+    "-DVULKAN_HEADERS_ENABLE_MODULE=OFF",
+]

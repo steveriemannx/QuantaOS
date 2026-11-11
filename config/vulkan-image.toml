@@ -1,0 +1,18 @@
+# Temporary test image: Mesa/lavapipe + Vulkan loader + smoke test.
+include = ["minimal.toml"]
+
+[general]
+filesystem_size = 512
+
+[packages]
+libdrm = "binary"
+llvm21 = "binary"
+mesa = "binary"
+libvulkan = {}
+vulkan-smoketest = {}
+
+[[files]]
+path = "/usr/lib/init.d/90_vulkan_smoke"
+data = """
+nowait /usr/bin/vulkan-smoketest
+"""

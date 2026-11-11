@@ -8,6 +8,8 @@ dependencies = [
     "freefont",
     "hicolor-icon-theme",
     "installer-gui",
+    "libvulkan",
+    "mesa",
     "netsurf",
     "orbdata",
     "orbital",
