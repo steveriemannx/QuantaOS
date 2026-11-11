@@ -63,10 +63,16 @@ and `.git/`; switch it to a git source once the fork is pushed.
 Side benefit of dropping blade: `mesa` + `llvm` (C/C++) and `winit` (Apache-2.0-only)
 leave the dependency closure, which is exactly what the Rust/MIT goal needs.
 
-## Phase 3 — desktop applications (planned)
+## Phase 3 — desktop applications (in progress)
 
 Port the desktop userland to FerriticUI: terminal (replaces `orbterm`), installer
 (`installer-gui`), file manager, settings. Desktop shell goes through `orbutils`/`orbital`.
+
+- Terminal — **v0 done**: `ferritic-term` (in the FerriticUI `ferriticui` package) uses
+  ransid for ANSI/VT emulation, a `/dev/ptmx` PTY running `ion`, and ferritic-soft/Orbital
+  for display. Verified in the test image (`echo hi` echoes and executes; launcher entry
+  `Terminal`). No scrollback, selection/copy or mouse reporting yet. `orbterm` remains
+  ignored by the desktop config.
 
 ## Phase 4 — Rust + MIT compliance (planned)
 
@@ -100,9 +106,14 @@ Known violations inside the default desktop closure:
       make CONFIG_NAME=ferriticui PODMAN_BUILD=0 PREFIX_BINARY=1 REPO_BINARY=1 \
       FSTOOLS_NO_MOUNT=1 build/x86_64/ferriticui/harddrive.img
   ```
-  After login the demo appears as a taskbar/launcher icon with the FerriticUI icon;
-  it can also be started as `ferritic-demo` from the serial console
+  After login the apps appear as taskbar/launcher icons (`Terminal`, `FerriticUI
+  Counter`); they can also be started from the serial console
   (`root`/`password`).
+- QEMU input for tests: boot with `-device usb-kbd` (no usb-tablet), log in graphically
+  with `sendkey ret`, launch `ferritic-term &` from the serial console, click the window
+  (`mouse_move 100 100`, then `mouse_button 1` / `0`), and type through the monitor
+  (`sendkey e`, `sendkey spc`, `sendkey ret`, ...). Do not use host xdotool typing for
+  Redox tests: it lands in whichever host window has focus.
 - Build happens on the `datalinux` volume (`/run/media/shxu/datalinux`); it is a
   udisks2 auto-mounted volume, so it disappears on logout/reboot.
 - There is no `podman`; QEMU 10.2.1 and gvncviewer are unpacked under `.host-tools/`.

@@ -1,5 +1,5 @@
 [package]
-description = "FerriticUI demo: static retained-mode UI on the Orbital windowing system"
+description = "FerriticUI demo and terminal on the Orbital windowing system"
 
 # Local source tree (a clean export of /run/media/shxu/datalinux/FerriticUI
 # without target/ and .git/). Switch to a git source once the fork is pushed.
@@ -10,12 +10,19 @@ path = "/run/media/shxu/datalinux/ferriticui-redox-src"
 template = "custom"
 script = """
 DYNAMIC_INIT
-cookbook_cargo_packages ferritic-demo
+cookbook_cargo_packages ferritic-demo ferritic-term
 
-# Register the demo with the Orbital launcher (/usr/share/ui/apps entries).
+# Register the apps with the Orbital launcher (/usr/share/ui/apps entries).
 mkdir -pv "${COOKBOOK_STAGE}/usr/share/icons/apps" "${COOKBOOK_STAGE}/usr/share/ui/apps"
 cp -v "${COOKBOOK_SOURCE}/crates/ferritic-demo/assets/ferriticui.png" \
     "${COOKBOOK_STAGE}/usr/share/icons/apps/ferriticui.png"
+cat > "${COOKBOOK_STAGE}/usr/share/ui/apps/60_term" <<'ENTRY'
+name=Terminal
+binary=/usr/bin/ferritic-term
+icon=/usr/share/icons/apps/utilities-terminal.png
+author=QuantaOS
+description=Terminal with ransid emulation and ferritic-soft rendering
+ENTRY
 cat > "${COOKBOOK_STAGE}/usr/share/ui/apps/65_ferriticui" <<'ENTRY'
 name=FerriticUI Counter
 binary=/usr/bin/ferritic-demo
@@ -24,8 +31,18 @@ author=QuantaOS
 description=Static retained-mode UI demo rendered by ferritic-soft
 ENTRY
 
-# Freedesktop entry for file associations and other launchers.
+# Freedesktop entries for file associations and other launchers.
 mkdir -pv "${COOKBOOK_STAGE}/usr/share/applications"
+cat > "${COOKBOOK_STAGE}/usr/share/applications/ferritic-term.desktop" <<'ENTRY'
+[Desktop Entry]
+Name=Terminal
+Comment=Terminal with ransid emulation and ferritic-soft rendering
+Exec=ferritic-term
+Icon=/usr/share/icons/apps/utilities-terminal.png
+Terminal=false
+Type=Application
+Categories=System;TerminalEmulator;
+ENTRY
 cat > "${COOKBOOK_STAGE}/usr/share/applications/ferriticui.desktop" <<'ENTRY'
 [Desktop Entry]
 Name=FerriticUI Counter
