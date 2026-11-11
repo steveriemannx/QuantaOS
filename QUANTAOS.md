@@ -85,6 +85,32 @@ Known violations inside the default desktop closure:
 - `binutils` (GPL), `findutils` (GPL), `strace` (C) — replace with Rust/MIT equivalents
 - `netsurf` (MIT but C) — replace with a Rust browser or drop from the image
 
+## Next workstreams (as of 2026-11-11)
+
+Three parallel tracks. They share `ferritic-core`/`ferritic-text`, but not a rendering
+backend.
+
+### 1. `ferritic-soft` — polish the CPU rasterizer
+
+Keep improving the CPU path: it is the renderer for every FerriticUI app on Redox,
+because Orbital has no GPU API. Blade parity is already SSIM 0.9996 on the same host;
+the remaining work is quality and features, not a platform bring-up.
+
+### 2. `ferritic-blade` + Vulkan + Mesa — GPU route on Redox
+
+Keep improving the GPU path until it runs on Redox. `libvulkan` and `mesa` (lavapipe)
+now build and are part of the desktop and CI package sets; `vulkan-smoketest` checks
+the loader with a dlopen + instance/device enumeration. Next: run `ferritic-blade`
+through the loader in QEMU, then decide whether Mesa/lavapipe can stay in the default
+image given the Phase 4 Rust/MIT scope.
+
+### 3. QuantaGPU — Rust-native GPU protocol and driver
+
+Keep improving the all-Rust route: protocol, driver and client in Rust, **no C**, no
+Vulkan. Keep it narrow — one simple device, one scanout, one client model — and do
+not generalize yet. Design and v0 scope: [`QUANTAOS_GPU.md`](QUANTAOS_GPU.md). Start
+with the virtio-gpu 2D present path (v0); virgl (v1) is optional and later.
+
 ## Environment notes
 
 - Build host reachability: GitHub is blocked; `gitlab.redox-os.org` works over git
