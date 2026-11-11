@@ -1,0 +1,24 @@
+[package]
+description = "FerriticUI demo: static retained-mode UI on the Orbital windowing system"
+
+# Local source tree (a clean export of /run/media/shxu/datalinux/FerriticUI
+# without target/ and .git/). Switch to a git source once the fork is pushed.
+[source]
+path = "/run/media/shxu/datalinux/ferriticui-redox-src"
+
+[build]
+template = "custom"
+script = """
+DYNAMIC_INIT
+cookbook_cargo_packages ferritic-demo
+
+# Register the demo with the Orbital launcher (/usr/share/ui/apps entries).
+mkdir -pv "${COOKBOOK_STAGE}/usr/share/ui/apps"
+cat > "${COOKBOOK_STAGE}/usr/share/ui/apps/65_ferriticui" <<'ENTRY'
+name=FerriticUI Counter
+binary=/usr/bin/ferritic-demo
+icon=/usr/share/icons/apps/accessories-calculator.png
+author=QuantaOS
+description=Static retained-mode UI demo rendered by ferritic-soft
+ENTRY
+"""

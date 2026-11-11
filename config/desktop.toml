@@ -10,6 +10,7 @@ filesystem_size = 650
 # Package settings
 [packages]
 dejavu = {}
+ferriticui = {}
 file = {}
 freefont = {}
 hicolor-icon-theme = {}

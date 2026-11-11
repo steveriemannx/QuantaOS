@@ -27,18 +27,36 @@ it is removed as a design choice (static retained-mode FerriticUI replaces it).
 - Updated `recipes/groups/desktop` meta package
 - Updated `README.md` wording and screenshots
 
-## Phase 2 — FerriticUI backends (next)
+## Phase 2 — FerriticUI backends (done)
 
 Two new crates, because FerriticUI currently cannot run on Redox:
 
-- `ferritic-orbital` — windowing platform, replaces `ferritic-winit` (X11/Wayland only).
-  Talks the Orbital protocol through `orbclient`.
 - `ferritic-soft` — CPU rasterizer, replaces `ferritic-blade` (blade needs
   Vulkan/Metal/D3D12; Redox has none). SDF-quad rasterization plus an A8 glyph atlas,
-  writing directly into the orbclient window buffer.
+  writing directly into the orbclient window buffer. **Done** on FerriticUI `main`:
+  nine unit tests, and the `counter_snapshot` example renders the counter scene to
+  PPM without a GPU. Against a blade render of the same scene on the same host the
+  output is SSIM 0.9996 (mean absolute channel difference 0.04); the checked-in
+  golden differs more (SSIM 0.94) because it was captured with a different host font.
+  `SystemText` now falls back to a Latin-capable face instead of the first database
+  entry, which on Linux could be a symbol font.
+- `ferritic-orbital` — windowing platform, replaces `ferritic-winit` (X11/Wayland only).
+  Talks the Orbital protocol through `orbclient`. **Done**: the `ferritic-demo` counter
+  opens an orbclient window rendered by `ferritic-soft`, with the winit layer's
+  key/mouse/wheel/focus/scale/clipboard mapping. It runs on the host through
+  orbclient's SDL2 backend and on Redox through the Orbital backend.
 
-Milestone: the `counter` demo renders into a real Orbital window on Redox.
-Recipe: `recipes/gui/ferriticui`.
+Milestone: **achieved** — `build/x86_64/ferriticui/harddrive.img` boots in QEMU; the
+counter window opens over Orbital and clicking `+` updates the count (verified with VGA
+screendumps). The image is assembled from the cached official binary packages plus the
+locally cooked `ferriticui` recipe; it intentionally omits the in-progress
+mesa/libvulkan packages.
+
+Recipe: `recipes/gui/ferriticui` builds the `ferritic-demo` package and installs an
+Orbital launcher entry (`/usr/share/ui/apps/65_ferriticui`, using the calculator icon
+for now), which shows up in the taskbar after login. Its source is a clean local export
+(`/run/media/shxu/datalinux/ferriticui-redox-src`) so the recipe copy excludes `target/`
+and `.git/`; switch it to a git source once the fork is pushed.
 
 Side benefit of dropping blade: `mesa` + `llvm` (C/C++) and `winit` (Apache-2.0-only)
 leave the dependency closure, which is exactly what the Rust/MIT goal needs.
@@ -62,6 +80,29 @@ Known violations inside the default desktop closure:
 - Build host reachability: GitHub is blocked; `gitlab.redox-os.org` works over git
   protocol (most recipes fetch from there); `crates.io` index is slow — use the
   `rsproxy.cn` mirror in `.cargo/config.toml`.
+- FerriticUI no longer has a GitHub git dependency: the `naga`/`naga-types` fork pin
+  (`kvark/wgpu` rev `9964733`) is vendored under `FerriticUI/vendor/wgpu-naga` with its
+  workspace-inherited fields inlined, and `vendor/blade-ferritic/Cargo.toml` points at
+  that path. `Cargo.lock` has no git sources, so FerriticUI builds with
+  `CARGO_NET_OFFLINE=false` even when GitHub is unreachable.
+- FerriticUI recipe/image workflow (native build, no podman):
+  ```sh
+  rsync -a --delete --exclude target/ --exclude .git/ \
+      /run/media/shxu/datalinux/FerriticUI/ /run/media/shxu/datalinux/ferriticui-redox-src/
+  export PATH="$HOME/.cargo/bin:$PWD/.host-tools/bin:$PATH" CI=1
+  make r.ferriticui PODMAN_BUILD=0 PREFIX_BINARY=1 REPO_BINARY=1 FSTOOLS_NO_MOUNT=1
+  # image assembly needs fake root ownership:
+  .host-tools/fakeroot/root/usr/bin/fakeroot-sysv -l \
+      .host-tools/fakeroot/root/usr/lib/x86_64-linux-gnu/libfakeroot/libfakeroot-sysv.so \
+      -f .host-tools/fakeroot/root/usr/bin/faked-sysv -- \
+      make CONFIG_NAME=ferriticui PODMAN_BUILD=0 PREFIX_BINARY=1 REPO_BINARY=1 \
+      FSTOOLS_NO_MOUNT=1 build/x86_64/ferriticui/harddrive.img
+  ```
+  After login the demo appears as a taskbar/launcher icon (calculator icon for now);
+  it can also be started as `ferritic-demo` from the serial console
+  (`root`/`password`).
 - Build happens on the `datalinux` volume (`/run/media/shxu/datalinux`); it is a
   udisks2 auto-mounted volume, so it disappears on logout/reboot.
-- `qemu-system-x86_64` and `podman` are not installed on the build host yet.
+- There is no `podman`; QEMU 10.2.1 and gvncviewer are unpacked under `.host-tools/`.
+  Boot the test image headlessly with `.host-tools/qemu`, a monitor socket for
+  `screendump`, a serial socket for shell access, and `-vnc 127.0.0.1:3` for viewing.

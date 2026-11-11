@@ -3,6 +3,7 @@
 dependencies = [
     "server",
     "dejavu",
+    "ferriticui",
     "file",
     "freefont",
     "hicolor-icon-theme",

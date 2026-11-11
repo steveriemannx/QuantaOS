@@ -1,0 +1,24 @@
+# FerriticUI demo test image: the pre-Vulkan desktop package set plus the
+# local ferriticui recipe. Launch `ferritic-demo` from the serial console after
+# boot; there is no desktop launcher entry yet.
+
+include = ["../desktop-minimal.toml", "../server.toml"]
+
+# General settings
+[general]
+filesystem_size = 700
+
+# Package settings
+[packages]
+dejavu = {}
+ferriticui = {}
+file = {}
+freefont = {}
+hicolor-icon-theme = {}
+installer-gui = {}
+netsurf = {}
+patchelf = {}
+pop-icon-theme = {}
+shared-mime-info = {}
+# orbterm from desktop-minimal is not in the cached package repo
+orbterm = "ignore"
