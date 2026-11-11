@@ -13,12 +13,27 @@ DYNAMIC_INIT
 cookbook_cargo_packages ferritic-demo
 
 # Register the demo with the Orbital launcher (/usr/share/ui/apps entries).
-mkdir -pv "${COOKBOOK_STAGE}/usr/share/ui/apps"
+mkdir -pv "${COOKBOOK_STAGE}/usr/share/icons/apps" "${COOKBOOK_STAGE}/usr/share/ui/apps"
+cp -v "${COOKBOOK_SOURCE}/crates/ferritic-demo/assets/ferriticui.png" \
+    "${COOKBOOK_STAGE}/usr/share/icons/apps/ferriticui.png"
 cat > "${COOKBOOK_STAGE}/usr/share/ui/apps/65_ferriticui" <<'ENTRY'
 name=FerriticUI Counter
 binary=/usr/bin/ferritic-demo
-icon=/usr/share/icons/apps/accessories-calculator.png
+icon=/usr/share/icons/apps/ferriticui.png
 author=QuantaOS
 description=Static retained-mode UI demo rendered by ferritic-soft
+ENTRY
+
+# Freedesktop entry for file associations and other launchers.
+mkdir -pv "${COOKBOOK_STAGE}/usr/share/applications"
+cat > "${COOKBOOK_STAGE}/usr/share/applications/ferriticui.desktop" <<'ENTRY'
+[Desktop Entry]
+Name=FerriticUI Counter
+Comment=Static retained-mode UI demo rendered by ferritic-soft
+Exec=ferritic-demo
+Icon=/usr/share/icons/apps/ferriticui.png
+Terminal=false
+Type=Application
+Categories=Utility;
 ENTRY
 """

@@ -53,8 +53,10 @@ locally cooked `ferriticui` recipe; it intentionally omits the in-progress
 mesa/libvulkan packages.
 
 Recipe: `recipes/gui/ferriticui` builds the `ferritic-demo` package and installs an
-Orbital launcher entry (`/usr/share/ui/apps/65_ferriticui`, using the calculator icon
-for now), which shows up in the taskbar after login. Its source is a clean local export
+Orbital launcher entry (`/usr/share/ui/apps/65_ferriticui`) with its own icon
+(`/usr/share/icons/apps/ferriticui.png`) and a freedesktop
+`/usr/share/applications/ferriticui.desktop`; it shows up in the taskbar after login.
+Its source is a clean local export
 (`/run/media/shxu/datalinux/ferriticui-redox-src`) so the recipe copy excludes `target/`
 and `.git/`; switch it to a git source once the fork is pushed.
 
@@ -98,7 +100,7 @@ Known violations inside the default desktop closure:
       make CONFIG_NAME=ferriticui PODMAN_BUILD=0 PREFIX_BINARY=1 REPO_BINARY=1 \
       FSTOOLS_NO_MOUNT=1 build/x86_64/ferriticui/harddrive.img
   ```
-  After login the demo appears as a taskbar/launcher icon (calculator icon for now);
+  After login the demo appears as a taskbar/launcher icon with the FerriticUI icon;
   it can also be started as `ferritic-demo` from the serial console
   (`root`/`password`).
 - Build happens on the `datalinux` volume (`/run/media/shxu/datalinux`); it is a
