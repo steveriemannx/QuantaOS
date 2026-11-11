@@ -71,8 +71,11 @@ Port the desktop userland to FerriticUI: terminal (replaces `orbterm`), installe
 - Terminal — **v0 done**: `ferritic-term` (in the FerriticUI `ferriticui` package) uses
   ransid for ANSI/VT emulation, a `/dev/ptmx` PTY running `ion`, and ferritic-soft/Orbital
   for display. Verified in the test image (`echo hi` echoes and executes; launcher entry
-  `Terminal`). No scrollback, selection/copy or mouse reporting yet. `orbterm` remains
-  ignored by the desktop config.
+  `Terminal`). It is autostarted on the Orbital VT at boot by an init.d service in
+  `config/x86_64/ferriticui.toml` (HOME/USER/SHELL are set; window creation retries while
+  Orbital starts). No scrollback, selection/copy or mouse reporting yet. `orbterm`
+  remains ignored by the desktop config. Autostart happens before login as root; a
+  session-autostart hook after login is still TODO.
 
 ## Phase 4 — Rust + MIT compliance (planned)
 
