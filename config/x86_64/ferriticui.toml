@@ -1,6 +1,6 @@
 # FerriticUI test image: the pre-Vulkan desktop package set plus the local
-# ferriticui recipe. The terminal is autostarted on the Orbital VT at boot
-# (after the display server), and both apps have launcher entries.
+# ferriticui recipe. Boot to a clean login; after logging in the Terminal and
+# Counter entries are available in the launcher/taskbar.
 
 include = ["../desktop-minimal.toml", "../server.toml"]
 
@@ -22,13 +22,3 @@ pop-icon-theme = {}
 shared-mime-info = {}
 # orbterm from desktop-minimal is not in the cached package repo
 orbterm = "ignore"
-
-# Start the FerriticUI terminal on the graphical VT once Orbital is up. The
-# retry env covers the race between this service and the display server; the
-# HOME/USER/SHELL envs give ion a usable login environment before login.
-[[files]]
-path = "/usr/lib/init.d/26_ferriticui"
-data = """
-requires_weak 20_orbital
-nowait VT=3 HOME=/root USER=root LOGNAME=root SHELL=/usr/bin/ion FERRITIC_WINDOW_RETRY_MS=15000 ferritic-term
-"""
