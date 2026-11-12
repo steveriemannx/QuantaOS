@@ -117,14 +117,15 @@ not generalize yet. Design and v0 scope: [`QUANTAOS_GPU.md`](QUANTAOS_GPU.md).
 Implemented: the versioned protocol with `DeviceInfo` feature advertisement and
 fence acknowledgements; `quanta-gpu-raster`, a pure-Rust SDF executor for the v1
 `Clear`/`Rect`/`Shadow`/`Glyph`/`Atlas` records; `quanta-gpud` executing those
-records and flipping the virtio-gpu 2D scanout; the client `frame()` API; and a
+records and flipping the virtio-gpu 2D scanout; the client `frame()` API; and
 `quanta-demo` with `--v1` (driver executes protocol records) and `--surface`
-(client rasterizes) modes. **The image boots in QEMU** (UEFI + virtio-vga,
-headless) and the v1 demo is verified from the scanout: quadrants, panel,
-moving bar and a 100% match for the `QUANTA` glyphs; see
-`quanta-gpu/scripts/qemu-test.py`. Next: wire `ferritic-quanta` to the client,
-then compare `--v1` and `--surface` on the same scene. virgl stays optional and
-later.
+(client rasterizes) modes. **The image now boots a small desktop in QEMU**:
+`quanta-term` shows a wallpaper, a floating (non-fullscreen) terminal window and
+runs `ion` on a PTY; keyboard input (`echo hi` -> `hi`) and title-bar mouse
+dragging are verified. The v1 demo is still verified from the scanout
+(quadrants, panel, moving bar, 100% `QUANTA` glyph match). Next: wire
+`ferritic-quanta` to this client and compare `--v1`/`--surface` on the same
+scene; virgl stays optional.
 
 ## Environment notes
 

@@ -42,7 +42,8 @@ impl drm::control::Device for DrmDevice {}
 
 /// One fullscreen scanout surface plus the shared client back buffer.
 pub struct Display {
-    consumer: File,
+    consumer: Option<File>,
+    vt: usize,
     dev: DrmDevice,
     // Declared before `buffer` so the mapping is dropped first.
     mapping: DumbMapping<'static>,
@@ -159,7 +160,8 @@ impl Display {
         }
 
         let mut display = Self {
-            consumer,
+            consumer: Some(consumer),
+            vt: 0,
             dev,
             mapping,
             buffer,
@@ -173,6 +175,7 @@ impl Display {
         };
         // The first frame is a black screen, but still make sure the scanout
         // is initialised since some hosts show uninitialised memory otherwise.
+        display.vt = display.vt_id()?;
         display.flush_full()?;
         display.activate();
         Ok(display)
@@ -196,6 +199,17 @@ impl Display {
 
     pub fn surface_ptr(&self) -> *mut u8 {
         self.back
+    }
+
+    /// Moves the VT input consumer to the input-forwarding thread. The thread
+    /// keeps the VT alive from then on; duplicating a scheme fd is not
+    /// guaranteed to work on Redox, so ownership is transferred instead.
+    pub fn take_consumer(&mut self) -> Option<File> {
+        self.consumer.take()
+    }
+
+    pub fn vt(&self) -> usize {
+        self.vt
     }
 
     pub fn surface_len(&self) -> usize {
@@ -315,24 +329,27 @@ impl Display {
 
     /// Makes our VT the active one, like `orbital` does with `inputd -A`.
     fn activate_vt(&mut self) -> bool {
-        match self.vt_id() {
-            Ok(vt) => match activate_vt(vt) {
-                Ok(()) => true,
-                Err(err) => {
-                    eprintln!("quanta-gpud: could not activate VT {vt}: {err}");
-                    false
-                }
-            },
+        let vt = self.vt;
+        if vt == 0 {
+            eprintln!("quanta-gpud: VT id was not resolved");
+            return false;
+        }
+        match activate_vt(vt) {
+            Ok(()) => true,
             Err(err) => {
-                eprintln!("quanta-gpud: could not determine VT id: {err}");
+                eprintln!("quanta-gpud: could not activate VT {vt}: {err}");
                 false
             }
         }
     }
 
-    fn vt_id(&self) -> Result<usize> {
+    pub fn vt_id(&self) -> Result<usize> {
+        let consumer = self
+            .consumer
+            .as_ref()
+            .ok_or_else(|| anyhow!("consumer was already moved"))?;
         let mut path = [0u8; 256];
-        let len = syscall::fpath(self.consumer.as_raw_fd() as usize, &mut path)
+        let len = syscall::fpath(consumer.as_raw_fd() as usize, &mut path)
             .map_err(|err| anyhow!("fpath(consumer): {err:?}"))?;
         let len = len.min(path.len());
         let bytes = &path[..len];

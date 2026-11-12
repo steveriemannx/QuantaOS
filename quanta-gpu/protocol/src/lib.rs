@@ -68,6 +68,101 @@ pub const OP_GLYPH: u16 = 13;
 pub const OP_ATLAS: u16 = 14;
 pub const OP_SUBMIT: u16 = 15;
 
+/// Wire size of one [`InputEvent`].
+pub const INPUT_EVENT_LEN: usize = 16;
+
+/// Keyboard and pointer events forwarded by the display service.
+///
+/// The service owns the VT input consumer; clients read these events from
+/// `/scheme/quanta-gpu/input`. The encoding is deliberately the same shape for
+/// every event kind: `x`/`y` carry the payload (a keymap character, pointer
+/// coordinates, a button mask or a scroll delta), `code` carries a scancode or
+/// button, and `pressed` is meaningful for keys and buttons.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct InputEvent {
+    pub kind: u16,
+    pub code: u16,
+    pub x: i32,
+    pub y: i32,
+    pub pressed: bool,
+}
+
+pub const INPUT_KEY: u16 = 1;
+pub const INPUT_MOUSE: u16 = 2;
+pub const INPUT_BUTTON: u16 = 3;
+pub const INPUT_SCROLL: u16 = 4;
+
+impl InputEvent {
+    pub const fn key(character: u32, scancode: u16, pressed: bool) -> Self {
+        Self {
+            kind: INPUT_KEY,
+            code: scancode,
+            x: character as i32,
+            y: 0,
+            pressed,
+        }
+    }
+
+    pub const fn mouse(x: i32, y: i32) -> Self {
+        Self {
+            kind: INPUT_MOUSE,
+            code: 0,
+            x,
+            y,
+            pressed: false,
+        }
+    }
+
+    pub const fn button(mask: i32) -> Self {
+        Self {
+            kind: INPUT_BUTTON,
+            code: 0,
+            x: mask,
+            y: 0,
+            pressed: mask & 1 != 0,
+        }
+    }
+
+    pub const fn scroll(dx: i32, dy: i32) -> Self {
+        Self {
+            kind: INPUT_SCROLL,
+            code: 0,
+            x: dx,
+            y: dy,
+            pressed: false,
+        }
+    }
+
+    /// Encodes the event in [`INPUT_EVENT_LEN`] little-endian bytes.
+    pub fn to_bytes(self) -> [u8; INPUT_EVENT_LEN] {
+        let mut bytes = [0u8; INPUT_EVENT_LEN];
+        bytes[0..2].copy_from_slice(&self.kind.to_le_bytes());
+        bytes[2..4].copy_from_slice(&self.code.to_le_bytes());
+        bytes[4..8].copy_from_slice(&self.x.to_le_bytes());
+        bytes[8..12].copy_from_slice(&self.y.to_le_bytes());
+        bytes[12] = u8::from(self.pressed);
+        bytes
+    }
+
+    /// Decodes one event. Reserved bytes must be zero so a future extension
+    /// cannot be silently misread as an event.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
+        if bytes.len() < INPUT_EVENT_LEN {
+            return Err(Error::Truncated);
+        }
+        if bytes[13..16] != [0, 0, 0] {
+            return Err(Error::BadPayload { op: 0 });
+        }
+        Ok(Self {
+            kind: u16::from_le_bytes([bytes[0], bytes[1]]),
+            code: u16::from_le_bytes([bytes[2], bytes[3]]),
+            x: i32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+            y: i32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
+            pressed: bytes[12] != 0,
+        })
+    }
+}
+
 /// A straight-alpha sRGB color.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Rgba8 {
@@ -1827,6 +1922,22 @@ mod tests {
             decode_frame(&bytes, &mut Sink::default()),
             Err(Error::TooManyRecords { .. })
         ));
+    }
+
+    #[test]
+    fn input_events_round_trip() {
+        let event = InputEvent::key('A' as u32, 0x1e, true);
+        let bytes = event.to_bytes();
+        assert_eq!(bytes.len(), INPUT_EVENT_LEN);
+        assert_eq!(InputEvent::from_bytes(&bytes), Ok(event));
+        assert!(InputEvent::from_bytes(&bytes[..4]).is_err());
+        let mut bad = bytes;
+        bad[15] = 1;
+        assert!(InputEvent::from_bytes(&bad).is_err());
+        assert_eq!(
+            InputEvent::from_bytes(&InputEvent::mouse(10, 20).to_bytes()).unwrap(),
+            InputEvent::mouse(10, 20)
+        );
     }
 
     #[test]

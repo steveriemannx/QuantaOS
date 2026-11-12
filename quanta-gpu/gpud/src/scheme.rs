@@ -1,8 +1,13 @@
 //! `/scheme/quanta-gpu`: `info`, `fb` and `ctl`.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use quanta_gpu_protocol::{decode_frame, peek_frame_info, DeviceInfo, Features, Format, VERSION};
+use quanta_gpu_protocol::{
+    decode_frame, peek_frame_info, DeviceInfo, Features, Format, InputEvent, INPUT_EVENT_LEN,
+    VERSION,
+};
 use quanta_gpu_raster::{Executor, Rasterizer, Surface};
 use redox_scheme::scheme::SchemeSync;
 use redox_scheme::{CallerCtx, OpenResult};
@@ -16,6 +21,12 @@ use crate::display::Display;
 
 /// Keep the per-client fence queue bounded if nobody reads it.
 const MAX_PENDING_FENCES: usize = 64;
+/// Keep the keyboard queue bounded if the client is not reading.
+pub const MAX_PENDING_INPUT: usize = 256;
+
+/// Keyboard events read from the VT input consumer, shared between the input
+/// thread and the scheme request loop.
+pub type InputQueue = Arc<Mutex<VecDeque<InputEvent>>>;
 
 /// Record why a frame was rejected. The first few go to `/tmp` so a headless
 /// QEMU test can read them over the serial console; after that we stay quiet
@@ -63,6 +74,7 @@ enum Handle {
     Info,
     Fb,
     Ctl,
+    Input,
 }
 
 pub struct QuantaScheme {
@@ -76,13 +88,16 @@ pub struct QuantaScheme {
     rasterizer: Rasterizer,
     /// Completed `Present` sequence numbers (or explicit client tokens).
     fences: VecDeque<u64>,
-    /// Whether the VT has been re-asserted for the first frame after the
-    /// console handoff.
-    activated: bool,
+    /// Keyboard events forwarded from the VT consumer.
+    input: InputQueue,
+    /// Last time the surface VT was claimed. The terminal presents at least
+    /// once a second, so this keeps inputd's active VT pointed at the consumer
+    /// that this service reads.
+    last_activate: Instant,
 }
 
 impl QuantaScheme {
-    pub fn new(display: Display) -> Self {
+    pub fn new(display: Display, input: InputQueue) -> Self {
         let device = DeviceInfo::new(
             VERSION,
             display.width(),
@@ -101,7 +116,8 @@ impl QuantaScheme {
             display,
             rasterizer: Rasterizer::new(),
             fences: VecDeque::new(),
-            activated: false,
+            input,
+            last_activate: Instant::now() - Duration::from_secs(2),
         };
         scheme.root = scheme.insert(Handle::Root);
         scheme
@@ -152,6 +168,7 @@ impl SchemeSync for QuantaScheme {
             "info" => Handle::Info,
             "fb" => Handle::Fb,
             "ctl" => Handle::Ctl,
+            "input" => Handle::Input,
             _ => return Err(Error::new(ENOENT)),
         };
         let number = if handle == Handle::Root {
@@ -206,6 +223,20 @@ impl SchemeSync for QuantaScheme {
                 buf[..bytes.len()].copy_from_slice(&bytes);
                 self.fences.pop_front();
                 Ok(bytes.len())
+            }
+            Handle::Input => {
+                if buf.len() < INPUT_EVENT_LEN {
+                    return Err(Error::new(EINVAL));
+                }
+                let event = {
+                    let mut queue = self.input.lock().unwrap();
+                    queue.pop_front()
+                };
+                let Some(event) = event else {
+                    return Err(Error::new(EWOULDBLOCK));
+                };
+                buf[..INPUT_EVENT_LEN].copy_from_slice(&event.to_bytes());
+                Ok(INPUT_EVENT_LEN)
             }
             Handle::Fb => Err(Error::new(EBADF)),
             Handle::Root => Err(Error::new(EISDIR)),
@@ -264,11 +295,13 @@ impl SchemeSync for QuantaScheme {
         };
 
         // The boot console handoff may have run after `Display::open`
-        // activated our VT. Claim the display back *before* the first present:
-        // a scanout flush on an inactive VT can block, which would otherwise
-        // freeze the very frame that was meant to activate it.
-        if !self.activated {
-            self.activated = self.display.activate();
+        // activated our VT. Claim it back before presenting; a scanout flush on
+        // an inactive VT can block. Keep re-asserting it while clients present:
+        // inputd routes the keyboard to the consumer of the active VT, and the
+        // terminal presents at least once a second while idle.
+        if self.last_activate.elapsed() >= Duration::from_secs(1) {
+            self.last_activate = Instant::now();
+            self.display.activate();
         }
         if let Err(err) = self.display.present(&info, &executed.damage) {
             log_reject(&format!("present failed: {err:#}"));
@@ -291,6 +324,7 @@ impl SchemeSync for QuantaScheme {
             Handle::Info => Ok(self.info.len() as u64),
             Handle::Fb => Ok(self.display.surface_len() as u64),
             Handle::Ctl => Ok(8),
+            Handle::Input => Ok(0),
             Handle::Root => Err(Error::new(EISDIR)),
         }
     }
@@ -304,6 +338,7 @@ impl SchemeSync for QuantaScheme {
             Handle::Info => (MODE_FILE | 0o444, self.info.len() as u64),
             Handle::Fb => (MODE_FILE | 0o660, self.display.surface_len() as u64),
             Handle::Ctl => (MODE_FILE | 0o660, 8),
+            Handle::Input => (MODE_FILE | 0o660, 0),
         };
         stat.st_mode = mode;
         stat.st_size = size;
@@ -330,7 +365,7 @@ impl SchemeSync for QuantaScheme {
         if self.get(id)? != Handle::Root {
             return Err(Error::new(ENOTDIR));
         }
-        const ENTRIES: [&str; 3] = ["info", "fb", "ctl"];
+        const ENTRIES: [&str; 4] = ["info", "fb", "ctl", "input"];
         for (index, name) in ENTRIES.iter().enumerate().skip(opaque_offset as usize) {
             buf.entry(DirEntry {
                 inode: 0,
@@ -348,6 +383,7 @@ impl SchemeSync for QuantaScheme {
             Handle::Info => "quanta-gpu/info",
             Handle::Fb => "quanta-gpu/fb",
             Handle::Ctl => "quanta-gpu/ctl",
+            Handle::Input => "quanta-gpu/input",
         };
         if buf.len() < path.len() + 1 {
             return Err(Error::new(EINVAL));

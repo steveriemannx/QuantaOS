@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["protocol", "raster", "client", "gpud", "demo"]
+members = ["protocol", "raster", "client", "gpud", "demo", "term", "key"]
 # Host tests cover the dependency-free protocol and raster crates. The client,
 # driver and demo are Redox-only and are built by the cookbook recipe for the
 # Redox target.

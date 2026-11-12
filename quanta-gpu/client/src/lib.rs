@@ -40,7 +40,8 @@ use libredox::{call, flag};
 /// Re-exported so applications need only depend on the client crate.
 pub use quanta_gpu_protocol::{
     AtlasCmd, CursorCmd, DeviceInfo, Error as ProtocolError, Features, FloatRect, Format,
-    FrameEncoder, FrameInfo, GlyphCmd, InfoError, PixelRect, RectCmd, Rgba8, ShadowCmd,
+    FrameEncoder, FrameInfo, GlyphCmd, InfoError, InputEvent, PixelRect, RectCmd, Rgba8, ShadowCmd,
+    INPUT_BUTTON, INPUT_EVENT_LEN, INPUT_KEY, INPUT_MOUSE,
 };
 
 /// Device description, shared with the driver through the protocol crate.
@@ -49,6 +50,7 @@ pub use quanta_gpu_protocol::DeviceInfo as Info;
 const INFO_PATH: &str = "/scheme/quanta-gpu/info";
 const FB_PATH: &str = "/scheme/quanta-gpu/fb";
 const CTL_PATH: &str = "/scheme/quanta-gpu/ctl";
+const INPUT_PATH: &str = "/scheme/quanta-gpu/input";
 
 /// An open connection to the display service.
 pub struct Connection {
@@ -56,6 +58,7 @@ pub struct Connection {
     // Kept open for the lifetime of the mapping.
     _fb: File,
     ctl: File,
+    input: File,
     map: *mut u8,
     map_len: usize,
     seq: u64,
@@ -82,6 +85,10 @@ impl Connection {
             .write(true)
             .custom_flags(flag::O_NONBLOCK as i32)
             .open(CTL_PATH)?;
+        let input = OpenOptions::new()
+            .read(true)
+            .custom_flags(flag::O_NONBLOCK as i32)
+            .open(INPUT_PATH)?;
 
         let map = unsafe {
             call::mmap(call::MmapArgs {
@@ -103,6 +110,7 @@ impl Connection {
             info,
             _fb: fb,
             ctl,
+            input,
             map,
             map_len,
             seq: 0,
@@ -203,6 +211,27 @@ impl Connection {
             Ok(8) => Ok(Some(u64::from_le_bytes(bytes))),
             Ok(count) => Err(invalid(&format!("short fence read ({count} bytes)"))),
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Drains pending keyboard events. Returns `Ok(0)` when the queue is empty;
+    /// the input file is non-blocking, so callers should poll it.
+    pub fn read_input(&mut self, out: &mut Vec<InputEvent>) -> io::Result<usize> {
+        let mut buffer = [0u8; INPUT_EVENT_LEN * 16];
+        match self.input.read(&mut buffer) {
+            Ok(0) => Ok(0),
+            Ok(count) => {
+                let mut parsed = 0;
+                for chunk in buffer[..count].chunks_exact(INPUT_EVENT_LEN) {
+                    if let Ok(event) = InputEvent::from_bytes(chunk) {
+                        out.push(event);
+                        parsed += 1;
+                    }
+                }
+                Ok(parsed)
+            }
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => Ok(0),
             Err(err) => Err(err),
         }
     }

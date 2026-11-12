@@ -6,13 +6,15 @@ general-purpose GPU stack: exactly one simple device, one scanout, one client mo
 
 This document is the design baseline. It is deliberately narrower than Vulkan/DRM.
 
-Status (2026-11-12): the v0 present path and the v1 pure-Rust render path are
-implemented, and the v1 image now boots in QEMU: `quanta-demo` reads the device
-description, maps the surface, submits `Clear`/`Rect`/`Shadow`/`Glyph`/`Atlas`
-records, and `quanta-gpud` executes them with `quanta-gpu-raster` (SDF
-rasterizer, no C, no Vulkan). A QEMU screendump of the 1280x800 virtio-gpu
-scanout shows the four coloured quadrants, the bordered panel, the `QUANTA`
-glyph row and the moving bar; the glyphs match the atlas bitmap exactly.
+Status (2026-11-12): the v0 present path, the v1 pure-Rust render path and a
+small desktop are implemented. The image boots a wallpaper desktop with a
+floating terminal window; `quanta-term` writes the wallpaper through the v0
+shared surface and draws the window, title, terminal text and pointer with v1
+`Rect`/`Shadow`/`Glyph`/`Atlas` records, which `quanta-gpud` executes with
+`quanta-gpu-raster` (SDF rasterizer, no C, no Vulkan). The terminal runs `ion`
+on a PTY and receives key/mouse events forwarded from the driver's VT input
+consumer. `quanta-demo` still exercises the protocol-only scene (quadrants,
+panel, `QUANTA` glyphs, moving bar) and its glyphs match the atlas exactly.
 The virgl executor is still optional and not required for a working image.
 
 ## 1. What "pure Rust GPU protocol" means here
@@ -230,8 +232,10 @@ also the largest work item; it is *not* required for an all-Rust image.
 
 The host test is [`quanta-gpu/scripts/qemu-test.py`](quanta-gpu/scripts/qemu-test.py).
 It boots `build/x86_64/quanta-gpu/harddrive.img` with OVMF + `virtio-vga`,
-`-display none`, and a QEMU monitor/serial socket pair, then verifies the
-screendump with Pillow:
+`-display none`, and a QEMU monitor/serial socket pair, waits for
+`quanta-term`, verifies the wallpaper and floating window with Pillow, then
+injects `echo hi` through the input producer and checks that the terminal
+repaints:
 
 ```sh
 python3 quanta-gpu/scripts/qemu-test.py
@@ -256,14 +260,19 @@ Two non-obvious boot/protocol requirements were found while bringing this up:
   the console VT after `quanta-gpud` has opened the display. The driver claims
   the VT back before the first `Present`; doing it after the flush can deadlock
   because the scanout flush itself waits for the display. Keep the headless
-  test's serial console drained: the demo and driver log there and a full
+  test's serial console drained: the terminal and driver log there and a full
   console buffer must not back-pressure the renderer.
+* **inputd returns a zero-length read when its queue is empty.** That is not
+  EOF. The forwarding thread must keep the consumer open, otherwise inputd
+  removes the VT and later activation fails with "non-existent VT".
 
 Verified results on 2026-11-12: `info` reports version 0, 1280x800, stride
 5120, `argb8888`, features `present,render`; `ls -l /scheme/quanta-gpu` lists
-`ctl`, `fb`, `info`; the screendump has the four exact quadrant colours, the
-panel fill/border, a 64-pixel yellow bar that advances between captures, and a
-100% glyph-bitmap match for the six 8x8 glyphs.
+`ctl`, `fb`, `info`, `input`; the 1280x800 screendump has 222 colours, the
+wallpaper and a floating 960x533 terminal window; `echo hi` typed through the
+GTK console prints `hi`; `quanta-key --drag` moves the window and restores the
+wallpaper underneath; the protocol-only demo still shows the four quadrant
+colours, panel, moving bar and a 100% glyph-bitmap match.
 
 Safety note for automation: the DSH harness on this host crashes its host
 process when asked to decode/display an image with its Electron-incompatible
@@ -271,7 +280,47 @@ process when asked to decode/display an image with its Electron-incompatible
 prints colour/geometry statistics; do not feed the captured image back through
 an image tool in that environment.
 
-## 7. Open decision
+## 7. Desktop and terminal (v1 client)
+
+[`quanta-gpu/term`](quanta-gpu/term/src/main.rs) is a single fullscreen client
+that looks like a small desktop. It does not use Orbital, FerriticUI, Mesa or
+Vulkan:
+
+* **Wallpaper.** `term/assets/wallpaper.ppm` is a 640x400 P6 image compiled
+  into the binary. `quanta-term` scales it into the mapped surface once per
+  frame (protocol v0) and then sends the v1 records, so the desktop background
+  is a real image rather than a solid `Clear`.
+* **Window.** The terminal is a floating, non-fullscreen window over the
+  wallpaper: a title bar, border, offset shadow, close button and a software
+  pointer. The window can be dragged by its title bar with mouse events.
+* **Terminal.** `ransid` handles ANSI/VT escape sequences; a PTY runs
+  `/usr/bin/ion`; an embedded 8x13 public-domain bitmap font is uploaded as an
+  A8 atlas and each cell is one `Glyph` record. The grid size follows the
+  window size, so the terminal is not fullscreen.
+* **Input.** `quanta-gpud` reads its VT input consumer on a dedicated thread
+  and exposes `/scheme/quanta-gpu/input`. `InputEvent` carries keys, pointer
+  motion, buttons and scroll; `quanta-term` maps keys to PTY bytes and uses the
+  pointer for drag/focus. `quanta-key` is a small diagnostic that injects the
+  same records into `/scheme/input/producer`.
+
+Two non-obvious input rules were found while wiring this up:
+
+* inputd's consumer read returns **0 bytes** when its queue is empty; it is not
+  EOF. Treating 0 as EOF made the forwarding thread exit and closed the VT,
+  after which `inputd` rejected VT activation because the VT no longer existed.
+  The thread now treats 0 as "poll again".
+* inputd routes keyboard/pointer events only to consumers of the **active VT**.
+  The boot console handoff can steal it. The terminal presents at least once a
+  second and `quanta-gpud` re-asserts its VT at most once a second, which keeps
+  the keyboard routed to the terminal while it is the visible desktop.
+
+Verified in QEMU: the wallpaper and floating window render at 640x480 (GTK) and
+1280x800 (headless); typing `echo hi` through the emulated keyboard produces
+`hi`; injecting a title-bar drag with `quanta-key --drag` moves the window and
+restores the wallpaper underneath. The test is
+[`quanta-gpu/scripts/qemu-test.py`](quanta-gpu/scripts/qemu-test.py).
+
+## 8. Open decision
 
 The protocol and the all-Rust goal are identical in v0 and v1. The only fork is
 whether the GPU must execute the shading:

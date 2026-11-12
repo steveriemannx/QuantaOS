@@ -1,0 +1,11 @@
+[package]
+name = "quanta-term"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+quanta-gpu-client = { workspace = true }
+quanta-gpu-protocol = { workspace = true }
+ransid = "0.5"
+libc = "0.2"

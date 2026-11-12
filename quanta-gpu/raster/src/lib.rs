@@ -265,13 +265,38 @@ impl Rasterizer {
             return;
         }
         let clip = clip_bounds(surface, cmd.clip, scale);
+        let radius = (cmd.radius * scale).max(0.0);
+        let border_width = (cmd.border_width * scale).max(0.0);
+
+        // Fast path for the opaque, square fills that make up window chrome,
+        // cell backgrounds and the panel. Avoids one SDF evaluation per pixel.
+        if radius == 0.0 && border_width == 0.0 && cmd.fill.a == 255 {
+            let Some((x0, y0, x1, y1)) = surface.pixel_range(shape.expand(1.0).intersect(clip))
+            else {
+                return;
+            };
+            self.damage.add(PixelRect::new(x0, y0, x1 - x0, y1 - y0));
+            let Some((fx0, fy0, fx1, fy1)) = surface.pixel_range(shape.intersect(clip)) else {
+                return;
+            };
+            let pixel = [cmd.fill.b, cmd.fill.g, cmd.fill.r, cmd.fill.a];
+            let stride = surface.stride;
+            for y in fy0..fy1 {
+                let row = &mut surface.data[y as usize * stride..];
+                for x in fx0..fx1 {
+                    let offset = x as usize * 4;
+                    row[offset..offset + 4].copy_from_slice(&pixel);
+                }
+            }
+            return;
+        }
+
         let area = shape.expand(1.0).intersect(clip);
         let Some((x0, y0, x1, y1)) = surface.pixel_range(area) else {
             return;
         };
         self.damage.add(PixelRect::new(x0, y0, x1 - x0, y1 - y0));
 
-        let radius = (cmd.radius * scale).max(0.0);
         let border_width = (cmd.border_width * scale).max(0.0);
         let fill = [
             cmd.fill.r as f32 / 255.0,

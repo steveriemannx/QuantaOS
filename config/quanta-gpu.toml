@@ -14,8 +14,8 @@ path = "/usr/lib/init.d/30_console_switch"
 data = ""
 
 [[files]]
-path = "/usr/lib/init.d/30_quanta-demo"
+path = "/usr/lib/init.d/30_quanta-term"
 data = """
 requires_weak 20_quanta-gpud.service
-nowait quanta-demo
+nowait quanta-term
 """
