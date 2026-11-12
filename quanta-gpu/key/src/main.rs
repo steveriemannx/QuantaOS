@@ -182,9 +182,28 @@ fn inject_drag(x1: i32, y1: i32, x2: i32, y2: i32) -> std::io::Result<()> {
     let mut producer = OpenOptions::new()
         .write(true)
         .open("/scheme/input/producer")?;
-    emit(&mut producer, 2, x1 as i64, y1 as i64)?; // EVENT_MOUSE
+    // The input consumer uses Orbital's absolute 0..=65535 range.
+    let (width, height) = screen_size().unwrap_or((640, 480));
+    let norm = |value: i32, limit: u32| -> i64 {
+        (value as i64 * 65535 / limit.max(1) as i64).clamp(0, 65535)
+    };
+    emit(&mut producer, 2, norm(x1, width), norm(y1, height))?; // EVENT_MOUSE
     emit(&mut producer, 3, 1, 0)?; // EVENT_BUTTON, left down
-    emit(&mut producer, 2, x2 as i64, y2 as i64)?;
+    emit(&mut producer, 2, norm(x2, width), norm(y2, height))?;
     emit(&mut producer, 3, 0, 0)?; // left up
     producer.write_all(&[0xf5])
+}
+
+fn screen_size() -> Option<(u32, u32)> {
+    let info = std::fs::read_to_string("/scheme/quanta-gpu/info").ok()?;
+    let mut width = None;
+    let mut height = None;
+    for line in info.lines() {
+        if let Some(value) = line.strip_prefix("width=") {
+            width = value.trim().parse().ok();
+        } else if let Some(value) = line.strip_prefix("height=") {
+            height = value.trim().parse().ok();
+        }
+    }
+    Some((width?, height?))
 }

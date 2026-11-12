@@ -298,10 +298,13 @@ Vulkan:
   A8 atlas and each cell is one `Glyph` record. The grid size follows the
   window size, so the terminal is not fullscreen.
 * **Input.** `quanta-gpud` reads its VT input consumer on a dedicated thread
-  and exposes `/scheme/quanta-gpu/input`. `InputEvent` carries keys, pointer
-  motion, buttons and scroll; `quanta-term` maps keys to PTY bytes and uses the
-  pointer for drag/focus. `quanta-key` is a small diagnostic that injects the
-  same records into `/scheme/input/producer`.
+  and exposes `/scheme/quanta-gpu/input`. `InputEvent` carries keys, absolute
+  and relative pointer motion, buttons and scroll; `quanta-term` maps keys to
+  PTY bytes and uses the pointer for drag/focus. Absolute pointer coordinates
+  arrive in Orbital's `0..=65535` range (usbhidd doubles HID values), so the
+  terminal scales them to the current surface; relative deltas are pixels.
+  `quanta-key` is a small diagnostic that injects the same records into
+  `/scheme/input/producer`.
 
 Two non-obvious input rules were found while wiring this up:
 

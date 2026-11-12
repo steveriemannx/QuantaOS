@@ -122,6 +122,7 @@ fn spawn_input_reader(mut consumer: File, input: InputQueue) {
         const EVENT_MOUSE: i64 = 2;
         const EVENT_BUTTON: i64 = 3;
         const EVENT_SCROLL: i64 = 4;
+        const EVENT_MOUSE_RELATIVE: i64 = 11;
         let mut buffer = [0u8; EVENT_LEN * 32];
         let mut stale_reported = false;
         loop {
@@ -161,6 +162,9 @@ fn spawn_input_reader(mut consumer: File, input: InputQueue) {
                             EVENT_KEY => InputEvent::key(character, scancode, pressed),
                             EVENT_MOUSE => InputEvent::mouse(character as i32, packed as i32),
                             EVENT_BUTTON => InputEvent::button(character as i32),
+                            EVENT_MOUSE_RELATIVE => {
+                                InputEvent::mouse_relative(character as i32, packed as i32)
+                            }
                             EVENT_SCROLL => InputEvent::scroll(character as i32, packed as i32),
                             _ => continue,
                         };

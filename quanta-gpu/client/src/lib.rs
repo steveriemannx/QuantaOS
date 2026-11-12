@@ -41,7 +41,7 @@ use libredox::{call, flag};
 pub use quanta_gpu_protocol::{
     AtlasCmd, CursorCmd, DeviceInfo, Error as ProtocolError, Features, FloatRect, Format,
     FrameEncoder, FrameInfo, GlyphCmd, InfoError, InputEvent, PixelRect, RectCmd, Rgba8, ShadowCmd,
-    INPUT_BUTTON, INPUT_EVENT_LEN, INPUT_KEY, INPUT_MOUSE,
+    INPUT_BUTTON, INPUT_EVENT_LEN, INPUT_KEY, INPUT_MOUSE, INPUT_MOUSE_RELATIVE,
 };
 
 /// Device description, shared with the driver through the protocol crate.

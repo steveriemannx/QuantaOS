@@ -16,7 +16,9 @@ mod wallpaper;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use quanta_gpu_client::{Connection, InputEvent, INPUT_BUTTON, INPUT_KEY, INPUT_MOUSE};
+use quanta_gpu_client::{
+    Connection, InputEvent, INPUT_BUTTON, INPUT_KEY, INPUT_MOUSE, INPUT_MOUSE_RELATIVE,
+};
 
 use crate::session::Session;
 use crate::terminal::Terminal;
@@ -97,7 +99,15 @@ fn main() {
         for event in &input_events {
             match event.kind {
                 INPUT_MOUSE => {
-                    desktop.pointer(event.x, event.y);
+                    // inputd/Orbital use an absolute 0..=65535 range.
+                    let x = (event.x as i64 * conn.width() as i64 / 65535) as i32;
+                    let y = (event.y as i64 * conn.height() as i64 / 65535) as i32;
+                    desktop.pointer(x, y);
+                    dirty = true;
+                    continue;
+                }
+                INPUT_MOUSE_RELATIVE => {
+                    desktop.move_pointer(event.x, event.y);
                     dirty = true;
                     continue;
                 }

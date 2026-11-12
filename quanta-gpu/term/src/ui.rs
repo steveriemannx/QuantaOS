@@ -119,6 +119,8 @@ pub struct Desktop {
     win_x: i32,
     win_y: i32,
     pointer: (i32, i32),
+    screen_w: i32,
+    screen_h: i32,
     dragging: Option<(i32, i32)>,
     left_down: bool,
     full_damage: bool,
@@ -138,6 +140,8 @@ impl Desktop {
             win_x,
             win_y,
             pointer: (width as i32 / 2, height as i32 / 2),
+            screen_w: width as i32,
+            screen_h: height as i32,
             dragging: None,
             left_down: false,
             full_damage: true,
@@ -149,13 +153,21 @@ impl Desktop {
     }
 
     pub fn pointer(&mut self, x: i32, y: i32) {
-        self.pointer = (x, y);
+        self.pointer = (
+            x.clamp(0, self.screen_w.saturating_sub(1)),
+            y.clamp(0, self.screen_h.saturating_sub(1)),
+        );
         if let Some((dx, dy)) = self.dragging {
             self.win_x = x - dx;
             self.win_y = y - dy;
             self.clamp_window();
             self.full_damage = true;
         }
+    }
+
+    pub fn move_pointer(&mut self, dx: i32, dy: i32) {
+        let (x, y) = self.pointer;
+        self.pointer(x.saturating_add(dx), y.saturating_add(dy));
     }
 
     pub fn button(&mut self, mask: i32) {
@@ -190,6 +202,8 @@ impl Desktop {
     pub fn render(&mut self, conn: &mut Connection, term: &Terminal) -> io::Result<u64> {
         let width = conn.width();
         let height = conn.height();
+        self.screen_w = width as i32;
+        self.screen_h = height as i32;
         if self.layout.win_w != Layout::new(width, height).win_w
             || self.layout.win_h != Layout::new(width, height).win_h
         {

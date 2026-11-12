@@ -91,6 +91,7 @@ pub const INPUT_KEY: u16 = 1;
 pub const INPUT_MOUSE: u16 = 2;
 pub const INPUT_BUTTON: u16 = 3;
 pub const INPUT_SCROLL: u16 = 4;
+pub const INPUT_MOUSE_RELATIVE: u16 = 5;
 
 impl InputEvent {
     pub const fn key(character: u32, scancode: u16, pressed: bool) -> Self {
@@ -109,6 +110,16 @@ impl InputEvent {
             code: 0,
             x,
             y,
+            pressed: false,
+        }
+    }
+
+    pub const fn mouse_relative(dx: i32, dy: i32) -> Self {
+        Self {
+            kind: INPUT_MOUSE_RELATIVE,
+            code: 0,
+            x: dx,
+            y: dy,
             pressed: false,
         }
     }
