@@ -1,0 +1,1027 @@
+diff --git a/drivers/graphics/quanta-gpud/Cargo.toml b/drivers/graphics/quanta-gpud/Cargo.toml
+new file mode 100644
+index 0000000..dce333f
+--- /dev/null
++++ b/drivers/graphics/quanta-gpud/Cargo.toml
+@@ -0,0 +1,23 @@
++[package]
++name = "quanta-gpud"
++description = "Minimal pure-Rust virtio-gpu/virgl driver for QuantaGPU"
++version = "0.1.0"
++edition = "2021"
++
++[dependencies]
++anyhow.workspace = true
++futures.workspace = true
++log.workspace = true
++static_assertions.workspace = true
++
++common = { path = "../../common" }
++daemon = { path = "../../../daemon" }
++pcid = { path = "../../pcid" }
++virtio-core = { path = "../../virtio-core" }
++
++redox_event.workspace = true
++redox_syscall.workspace = true
++libredox.workspace = true
++
++[lints]
++workspace = true
+diff --git a/drivers/graphics/quanta-gpud/src/main.rs b/drivers/graphics/quanta-gpud/src/main.rs
+new file mode 100644
+index 0000000..bc419d7
+--- /dev/null
++++ b/drivers/graphics/quanta-gpud/src/main.rs
+@@ -0,0 +1,992 @@
++//! `virtio-gpu` is a virtio based graphics adapter. It can operate in 2D mode and in 3D mode.
++//!
++//! XXX: 3D mode will offload rendering ops to the host gpu and therefore requires a GPU with 3D support
++//! on the host machine.
++
++// Notes for the future:
++//
++// `virtio-gpu` 2D acceleration is just blitting. 3D acceleration has 2 kinds:
++//      - virgl - OpenGL
++//      - venus - Vulkan
++//
++// The Venus driver requires support for the following from the `virtio-gpu` kernel driver:
++//     - VIRTGPU_PARAM_3D_FEATURES
++//     - VIRTGPU_PARAM_CAPSET_QUERY_FIX
++//     - VIRTGPU_PARAM_RESOURCE_BLOB
++//     - VIRTGPU_PARAM_HOST_VISIBLE
++//     - VIRTGPU_PARAM_CROSS_DEVICE
++//     - VIRTGPU_PARAM_CONTEXT_INIT
++//
++// cc https://docs.mesa3d.org/drivers/venus.html
++// cc https://docs.mesa3d.org/drivers/virgl.html
++
++use std::sync::atomic::{AtomicU32, Ordering};
++
++use pcid_interface::PciFunctionHandle;
++use virtio_core::utils::VolatileCell;
++
++
++const VIRTIO_GPU_F_VIRGL: u32 = 0;
++const VIRTIO_GPU_F_EDID: u32 = 1;
++//const VIRTIO_GPU_F_RESOURCE_UUID: u32 = 2;
++//const VIRTIO_GPU_F_RESOURCE_BLOB: u32 = 3;
++//const VIRTIO_GPU_F_CONTEXT_INIT: u32 = 4;
++
++const VIRTIO_GPU_EVENT_DISPLAY: u32 = 1 << 0;
++const VIRTIO_GPU_MAX_SCANOUTS: usize = 16;
++
++const VIRTIO_GPU_CAPSET_VIRGL: u32 = 1;
++const VIRTIO_GPU_CAPSET_VIRGL2: u32 = 2;
++const VIRTIO_GPU_RESOURCE_FLAG_Y_0_TOP: u32 = 1 << 0;
++
++// Gallium/virgl constants used by the 3D path.
++const PIPE_TEXTURE_2D: u32 = 2;
++const VIRGL_FORMAT_B8G8R8A8_UNORM: u32 = 1;
++const VIRGL_BIND_RENDER_TARGET: u32 = 1 << 1;
++
++const QUANTA_CTX_ID: u32 = 1;
++const QUANTA_SURFACE_HANDLE: u32 = 1;
++
++// virgl command opcodes and object types (virgl_protocol.h).
++const VIRGL_CCMD_CREATE_OBJECT: u32 = 1;
++const VIRGL_CCMD_SET_VIEWPORT_STATE: u32 = 4;
++const VIRGL_CCMD_SET_FRAMEBUFFER_STATE: u32 = 5;
++const VIRGL_CCMD_CLEAR: u32 = 7;
++const VIRGL_OBJECT_SURFACE: u32 = 8;
++const PIPE_CLEAR_COLOR0: u32 = 1 << 0;
++
++#[repr(C)]
++pub struct GpuConfig {
++    /// Signals pending events to the driver.
++    pub events_read: VolatileCell<u32>, // read-only
++    /// Clears pending events in the device (write-to-clear).
++    pub events_clear: VolatileCell<u32>, // write-only
++
++    pub num_scanouts: VolatileCell<u32>,
++    pub num_capsets: VolatileCell<u32>,
++}
++
++impl GpuConfig {
++    #[inline]
++    pub fn num_scanouts(&self) -> u32 {
++        self.num_scanouts.get()
++    }
++
++    #[inline]
++    pub fn num_capsets(&self) -> u32 {
++        self.num_capsets.get()
++    }
++}
++
++#[derive(Debug, Copy, Clone, PartialEq)]
++#[repr(u32)]
++pub enum CommandTy {
++    Undefined = 0,
++
++    // 2D commands
++    GetDisplayInfo = 0x0100,
++    ResourceCreate2d,
++    ResourceUnref,
++    SetScanout,
++    ResourceFlush,
++    TransferToHost2d,
++    ResourceAttachBacking,
++    ResourceDetachBacking,
++    GetCapsetInfo,
++    GetCapset,
++    GetEdid,
++    ResourceAssignUuid,
++    ResourceCreateBlob,
++    SetScanoutBlob,
++
++    // 3D commands
++    CtxCreate = 0x0200,
++    CtxDestroy,
++    CtxAttachResource,
++    CtxDetachResource,
++    ResourceCreate3d,
++    TransferToHost3d,
++    TransferFromHost3d,
++    Submit3d,
++    ResourceMapBlob,
++    ResourceUnmapBlob,
++
++    // cursor commands
++    UpdateCursor = 0x0300,
++    MoveCursor,
++
++    // success responses
++    RespOkNodata = 0x1100,
++    RespOkDisplayInfo,
++    RespOkCapsetInfo,
++    RespOkCapset,
++    RespOkEdid,
++    RespOkResourceUuid,
++    RespOkMapInfo,
++
++    // error responses
++    RespErrUnspec = 0x1200,
++    RespErrOutOfMemory,
++    RespErrInvalidScanoutId,
++    RespErrInvalidResourceId,
++    RespErrInvalidContextId,
++    RespErrInvalidParameter,
++}
++
++static_assertions::const_assert_eq!(size_of::<CommandTy>(), 4);
++
++const VIRTIO_GPU_FLAG_FENCE: u32 = 1 << 0;
++//const VIRTIO_GPU_FLAG_INFO_RING_IDX: u32 = 1 << 1;
++
++#[derive(Debug)]
++#[repr(C)]
++pub struct ControlHeader {
++    pub ty: CommandTy,
++    pub flags: u32,
++    pub fence_id: u64,
++    pub ctx_id: u32,
++    pub ring_index: u8,
++    padding: [u8; 3],
++}
++
++impl ControlHeader {
++    pub fn with_ty(ty: CommandTy) -> Self {
++        Self {
++            ty,
++            ..Default::default()
++        }
++    }
++}
++
++impl Default for ControlHeader {
++    fn default() -> Self {
++        Self {
++            ty: CommandTy::Undefined,
++            flags: 0,
++            fence_id: 0,
++            ctx_id: 0,
++            ring_index: 0,
++            padding: [0; 3],
++        }
++    }
++}
++
++#[derive(Debug, Copy, Clone)]
++#[repr(C)]
++pub struct GpuRect {
++    pub x: u32,
++    pub y: u32,
++    pub width: u32,
++    pub height: u32,
++}
++
++impl GpuRect {
++    pub fn new(x: u32, y: u32, width: u32, height: u32) -> Self {
++        Self {
++            x,
++            y,
++            width,
++            height,
++        }
++    }
++}
++
++#[derive(Debug)]
++#[repr(C)]
++pub struct DisplayInfo {
++    rect: GpuRect,
++    pub enabled: u32,
++    pub flags: u32,
++}
++
++#[derive(Debug)]
++#[repr(C)]
++pub struct GetDisplayInfo {
++    pub header: ControlHeader,
++    pub display_info: [DisplayInfo; VIRTIO_GPU_MAX_SCANOUTS],
++}
++
++impl Default for GetDisplayInfo {
++    fn default() -> Self {
++        Self {
++            header: ControlHeader {
++                ty: CommandTy::GetDisplayInfo,
++                ..Default::default()
++            },
++
++            display_info: unsafe { core::mem::zeroed() },
++        }
++    }
++}
++
++static RESOURCE_ALLOC: AtomicU32 = AtomicU32::new(1); // XXX: 0 is reserved for whatever that takes `resource_id`.
++
++#[derive(PartialEq, Eq, Debug, Copy, Clone)]
++#[repr(C)]
++pub struct ResourceId(u32);
++
++impl ResourceId {
++    const NONE: ResourceId = ResourceId(0);
++
++    fn alloc() -> Self {
++        ResourceId(RESOURCE_ALLOC.fetch_add(1, Ordering::SeqCst))
++    }
++}
++
++#[derive(Debug, Copy, Clone)]
++#[repr(u32)]
++pub enum ResourceFormat {
++    Unknown = 0,
++
++    Bgrx = 2,
++    Xrgb = 4,
++}
++
++#[derive(Debug)]
++#[repr(C)]
++pub struct ResourceCreate2d {
++    pub header: ControlHeader,
++    resource_id: ResourceId,
++    format: ResourceFormat,
++    width: u32,
++    height: u32,
++}
++
++impl ResourceCreate2d {
++    fn new(resource_id: ResourceId, format: ResourceFormat, width: u32, height: u32) -> Self {
++        Self {
++            header: ControlHeader::with_ty(CommandTy::ResourceCreate2d),
++            resource_id,
++            format,
++            width,
++            height,
++        }
++    }
++}
++
++#[derive(Debug)]
++#[repr(C)]
++pub struct MemEntry {
++    pub address: u64,
++    pub length: u32,
++    pub padding: u32,
++}
++
++#[derive(Debug)]
++#[repr(C)]
++pub struct AttachBacking {
++    pub header: ControlHeader,
++    pub resource_id: ResourceId,
++    pub num_entries: u32,
++}
++
++impl AttachBacking {
++    pub fn new(resource_id: ResourceId, num_entries: u32) -> Self {
++        Self {
++            header: ControlHeader::with_ty(CommandTy::ResourceAttachBacking),
++            resource_id,
++            num_entries,
++        }
++    }
++}
++
++#[derive(Debug)]
++#[repr(C)]
++pub struct DetachBacking {
++    pub header: ControlHeader,
++    pub resource_id: ResourceId,
++    pub padding: u32,
++}
++
++impl DetachBacking {
++    pub fn new(resource_id: ResourceId) -> Self {
++        Self {
++            header: ControlHeader::with_ty(CommandTy::ResourceDetachBacking),
++            resource_id,
++            padding: 0,
++        }
++    }
++}
++
++#[derive(Debug)]
++#[repr(C)]
++pub struct ResourceFlush {
++    pub header: ControlHeader,
++    pub rect: GpuRect,
++    pub resource_id: ResourceId,
++    pub padding: u32,
++}
++
++impl ResourceFlush {
++    pub fn new(resource_id: ResourceId, rect: GpuRect) -> Self {
++        Self {
++            header: ControlHeader::with_ty(CommandTy::ResourceFlush),
++            rect,
++            resource_id,
++            padding: 0,
++        }
++    }
++}
++
++#[derive(Debug)]
++#[repr(C)]
++pub struct ResourceUnref {
++    pub header: ControlHeader,
++    pub resource_id: ResourceId,
++    pub padding: u32,
++}
++
++impl ResourceUnref {
++    pub fn new(resource_id: ResourceId) -> Self {
++        Self {
++            header: ControlHeader::with_ty(CommandTy::ResourceUnref),
++            resource_id,
++            padding: 0,
++        }
++    }
++}
++
++#[repr(C)]
++#[derive(Debug)]
++pub struct SetScanout {
++    pub header: ControlHeader,
++    pub rect: GpuRect,
++    pub scanout_id: u32,
++    pub resource_id: ResourceId,
++}
++
++impl SetScanout {
++    pub fn new(scanout_id: u32, resource_id: ResourceId, rect: GpuRect) -> Self {
++        Self {
++            header: ControlHeader::with_ty(CommandTy::SetScanout),
++
++            rect,
++            scanout_id,
++            resource_id,
++        }
++    }
++}
++
++#[derive(Debug)]
++#[repr(C)]
++pub struct XferToHost2d {
++    pub header: ControlHeader,
++    pub rect: GpuRect,
++    pub offset: u64,
++    pub resource_id: ResourceId,
++    pub padding: u32,
++}
++
++impl XferToHost2d {
++    pub fn new(resource_id: ResourceId, rect: GpuRect, offset: u64) -> Self {
++        Self {
++            header: ControlHeader::with_ty(CommandTy::TransferToHost2d),
++            rect,
++            offset,
++            resource_id,
++            padding: 0,
++        }
++    }
++}
++
++#[derive(Debug)]
++#[repr(C)]
++pub struct GetEdid {
++    pub header: ControlHeader,
++    pub scanout: u32,
++    pub padding: u32,
++}
++
++impl GetEdid {
++    pub fn new(scanout_id: u32) -> Self {
++        Self {
++            header: ControlHeader::with_ty(CommandTy::GetEdid),
++            scanout: scanout_id,
++            padding: 0,
++        }
++    }
++}
++
++#[derive(Debug)]
++#[repr(C)]
++pub struct GetEdidResp {
++    pub header: ControlHeader,
++    pub size: u32,
++    pub padding: u32,
++    pub edid: [u8; 1024],
++}
++
++impl GetEdidResp {
++    pub fn new() -> Self {
++        Self {
++            header: ControlHeader::with_ty(CommandTy::GetEdid),
++            size: 0,
++            padding: 0,
++            edid: [0; 1024],
++        }
++    }
++}
++
++#[derive(Debug)]
++#[repr(C)]
++pub struct GetCapsetInfo {
++    pub header: ControlHeader,
++    pub capset_index: u32,
++    pub padding: u32,
++}
++
++impl GetCapsetInfo {
++    pub fn new(capset_index: u32) -> Self {
++        Self {
++            header: ControlHeader::with_ty(CommandTy::GetCapsetInfo),
++            capset_index,
++            padding: 0,
++        }
++    }
++}
++
++#[derive(Debug)]
++#[repr(C)]
++pub struct GetCapsetInfoResp {
++    pub header: ControlHeader,
++    pub capset_id: u32,
++    pub capset_max_version: u32,
++    pub capset_max_size: u32,
++    pub padding: u32,
++}
++
++impl Default for GetCapsetInfoResp {
++    fn default() -> Self {
++        Self {
++            header: ControlHeader::default(),
++            capset_id: 0,
++            capset_max_version: 0,
++            capset_max_size: 0,
++            padding: 0,
++        }
++    }
++}
++
++#[derive(Debug)]
++#[repr(C)]
++pub struct CtxCreate {
++    pub header: ControlHeader,
++    pub nlen: u32,
++    pub context_init: u32,
++    pub debug_name: [u8; 64],
++}
++
++impl CtxCreate {
++    pub fn new(ctx_id: u32, name: &[u8]) -> Self {
++        let mut debug_name = [0u8; 64];
++        let len = name.len().min(debug_name.len());
++        debug_name[..len].copy_from_slice(&name[..len]);
++        Self {
++            header: ControlHeader {
++                ty: CommandTy::CtxCreate,
++                ctx_id,
++                ..Default::default()
++            },
++            nlen: len as u32,
++            context_init: 0,
++            debug_name,
++        }
++    }
++}
++
++#[derive(Debug)]
++#[repr(C)]
++pub struct CtxResource {
++    pub header: ControlHeader,
++    pub resource_id: ResourceId,
++    pub padding: u32,
++}
++
++impl CtxResource {
++    pub fn attach(ctx_id: u32, resource_id: ResourceId) -> Self {
++        Self {
++            header: ControlHeader {
++                ty: CommandTy::CtxAttachResource,
++                ctx_id,
++                ..Default::default()
++            },
++            resource_id,
++            padding: 0,
++        }
++    }
++}
++
++#[derive(Debug)]
++#[repr(C)]
++pub struct ResourceCreate3d {
++    pub header: ControlHeader,
++    pub resource_id: ResourceId,
++    pub target: u32,
++    pub format: u32,
++    pub bind: u32,
++    pub width: u32,
++    pub height: u32,
++    pub depth: u32,
++    pub array_size: u32,
++    pub last_level: u32,
++    pub nr_samples: u32,
++    pub flags: u32,
++    pub padding: u32,
++}
++
++impl ResourceCreate3d {
++    pub fn new(resource_id: ResourceId, width: u32, height: u32) -> Self {
++        Self {
++            header: ControlHeader::with_ty(CommandTy::ResourceCreate3d),
++            resource_id,
++            target: PIPE_TEXTURE_2D,
++            format: VIRGL_FORMAT_B8G8R8A8_UNORM,
++            bind: VIRGL_BIND_RENDER_TARGET,
++            width,
++            height,
++            depth: 1,
++            array_size: 1,
++            last_level: 0,
++            nr_samples: 0,
++            flags: VIRTIO_GPU_RESOURCE_FLAG_Y_0_TOP,
++            padding: 0,
++        }
++    }
++}
++
++#[derive(Debug)]
++#[repr(C)]
++pub struct CmdSubmit3d {
++    pub header: ControlHeader,
++    pub size: u32,
++    pub padding: u32,
++}
++
++impl CmdSubmit3d {
++    pub fn new(ctx_id: u32, size: u32) -> Self {
++        Self {
++            header: ControlHeader {
++                ty: CommandTy::Submit3d,
++                ctx_id,
++                ..Default::default()
++            },
++            size,
++            padding: 0,
++        }
++    }
++}
++
++#[derive(Debug)]
++#[repr(C)]
++pub struct CursorPos {
++    pub scanout_id: u32,
++    pub x: i32,
++    pub y: i32,
++    _padding: u32,
++}
++
++impl CursorPos {
++    pub fn new(scanout_id: u32, x: i32, y: i32) -> Self {
++        Self {
++            scanout_id,
++            x,
++            y,
++            _padding: 0,
++        }
++    }
++}
++
++/* VIRTIO_GPU_CMD_UPDATE_CURSOR, VIRTIO_GPU_CMD_MOVE_CURSOR */
++#[derive(Debug)]
++#[repr(C)]
++pub struct UpdateCursor {
++    pub header: ControlHeader,
++    pub pos: CursorPos,
++    pub resource_id: ResourceId,
++    pub hot_x: i32,
++    pub hot_y: i32,
++    _padding: u32,
++}
++
++impl UpdateCursor {
++    pub fn update_cursor(
++        scanout_id: u32,
++        x: i32,
++        y: i32,
++        hot_x: i32,
++        hot_y: i32,
++        resource_id: ResourceId,
++    ) -> Self {
++        Self {
++            header: ControlHeader::with_ty(CommandTy::UpdateCursor),
++            pos: CursorPos::new(scanout_id, x, y),
++            resource_id,
++            hot_x,
++            hot_y,
++            _padding: 0,
++        }
++    }
++}
++
++#[derive(Debug)]
++#[repr(C)]
++pub struct MoveCursor {
++    pub header: ControlHeader,
++    pub pos: CursorPos,
++    pub resource_id: ResourceId,
++    pub hot_x: i32,
++    pub hot_y: i32,
++    _padding: u32,
++}
++
++impl MoveCursor {
++    /// QEMU QUIRK: This should not have a `resource_id` argument, but
++    /// unfortunately QEMU has a bug where it reads the `resource_id` field from
++    /// the cursor command when calling `qemu_console_set_mouse`, rather than
++    /// reading the stored `resource_id` from the last cursor update command.
++    pub fn move_cursor(scanout_id: u32, x: i32, y: i32, resource_id: ResourceId) -> Self {
++        Self {
++            header: ControlHeader::with_ty(CommandTy::MoveCursor),
++            pos: CursorPos::new(scanout_id, x, y),
++            resource_id,
++            hot_x: 0,
++            hot_y: 0,
++            _padding: 0,
++        }
++    }
++}
++
++
++use std::sync::Arc;
++
++use common::dma::Dma;
++use virtio_core::spec::{Buffer, ChainBuilder, DescriptorFlags};
++use virtio_core::transport::{Error, Queue, Transport};
++
++/// Minimal QuantaGPU driver: one virtio-gpu 3D scanout, no DRM/KMS, no Vulkan.
++struct QuantaGpu {
++    control_queue: Arc<Queue>,
++    num_capsets: u32,
++    _transport: Arc<dyn Transport>,
++}
++
++impl QuantaGpu {
++    async fn send_request<T: Send + 'static>(
++        &self,
++        request: Dma<T>,
++    ) -> Result<Dma<ControlHeader>, Error> {
++        let header = Dma::new(ControlHeader::default())?;
++        let command = ChainBuilder::new()
++            .chain(Buffer::new(request))
++            .chain(Buffer::new(header).flags(DescriptorFlags::WRITE_ONLY))
++            .build();
++
++        let (_, [_, header]) = self.control_queue.send(command).await.into_parts();
++        Ok(header.into_inner())
++    }
++
++    async fn get_display_info(&self) -> anyhow::Result<Dma<GetDisplayInfo>> {
++        let header = Dma::new(ControlHeader::with_ty(CommandTy::GetDisplayInfo))?;
++        let response = Dma::new(GetDisplayInfo::default())?;
++        let command = ChainBuilder::new()
++            .chain(Buffer::new(header))
++            .chain(Buffer::new(response).flags(DescriptorFlags::WRITE_ONLY))
++            .build();
++        let (_, [_, response]) = self.control_queue.send(command).await.into_parts();
++        let response: Dma<GetDisplayInfo> = response.into_inner();
++        anyhow::ensure!(
++            response.header.ty == CommandTy::RespOkDisplayInfo,
++            "get_display_info failed: {:?}",
++            response.header.ty
++        );
++        Ok(response)
++    }
++
++    async fn get_capset_info(&self, index: u32) -> anyhow::Result<Dma<GetCapsetInfoResp>> {
++        let request = Dma::new(GetCapsetInfo::new(index))?;
++        let response = Dma::new(GetCapsetInfoResp::default())?;
++        let command = ChainBuilder::new()
++            .chain(Buffer::new(request))
++            .chain(Buffer::new(response).flags(DescriptorFlags::WRITE_ONLY))
++            .build();
++        let (_, [_, response]) = self.control_queue.send(command).await.into_parts();
++        let response: Dma<GetCapsetInfoResp> = response.into_inner();
++        anyhow::ensure!(
++            response.header.ty == CommandTy::RespOkCapsetInfo,
++            "get_capset_info({index}) failed: {:?}",
++            response.header.ty
++        );
++        Ok(response)
++    }
++
++    async fn ctx_create(&self) -> anyhow::Result<()> {
++        let request = Dma::new(CtxCreate::new(QUANTA_CTX_ID, b"quanta-gpu"))?;
++        let header = self.send_request(request).await?;
++        anyhow::ensure!(
++            header.ty == CommandTy::RespOkNodata,
++            "ctx_create failed: {:?}",
++            header.ty
++        );
++        Ok(())
++    }
++
++    async fn resource_create_3d(
++        &self,
++        width: u32,
++        height: u32,
++    ) -> anyhow::Result<ResourceId> {
++        let resource_id = ResourceId::alloc();
++        let request = Dma::new(ResourceCreate3d::new(resource_id, width, height))?;
++        let header = self.send_request(request).await?;
++        anyhow::ensure!(
++            header.ty == CommandTy::RespOkNodata,
++            "resource_create_3d failed: {:?}",
++            header.ty
++        );
++        Ok(resource_id)
++    }
++
++    async fn ctx_attach_resource(&self, resource_id: ResourceId) -> anyhow::Result<()> {
++        let request = Dma::new(CtxResource::attach(QUANTA_CTX_ID, resource_id))?;
++        let header = self.send_request(request).await?;
++        anyhow::ensure!(
++            header.ty == CommandTy::RespOkNodata,
++            "ctx_attach_resource failed: {:?}",
++            header.ty
++        );
++        Ok(())
++    }
++
++    async fn set_scanout(
++        &self,
++        resource_id: ResourceId,
++        width: u32,
++        height: u32,
++    ) -> anyhow::Result<()> {
++        let request = Dma::new(SetScanout::new(
++            0,
++            resource_id,
++            GpuRect::new(0, 0, width, height),
++        ))?;
++        let header = self.send_request(request).await?;
++        anyhow::ensure!(
++            header.ty == CommandTy::RespOkNodata,
++            "set_scanout failed: {:?}",
++            header.ty
++        );
++        Ok(())
++    }
++
++    async fn submit_3d(&self, commands: &[u32]) -> anyhow::Result<()> {
++        let byte_len = commands.len() * 4;
++        let request = Dma::new(CmdSubmit3d::new(QUANTA_CTX_ID, byte_len as u32))?;
++        let mut bytes: Dma<[u8]> = unsafe { Dma::zeroed_slice(byte_len)?.assume_init() };
++        for (index, word) in commands.iter().enumerate() {
++            bytes[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
++        }
++        let response = Dma::new(ControlHeader::default())?;
++        let command = ChainBuilder::new()
++            .chain(Buffer::new(request))
++            .chain(Buffer::new(bytes))
++            .chain(Buffer::new(response).flags(DescriptorFlags::WRITE_ONLY))
++            .build();
++        let (_, [_, _, header]) = self.control_queue.send(command).await.into_parts();
++        let header: Dma<ControlHeader> = header.into_inner();
++        anyhow::ensure!(
++            header.ty == CommandTy::RespOkNodata,
++            "submit_3d failed: {:?}",
++            header.ty
++        );
++        Ok(())
++    }
++
++    async fn flush(
++        &self,
++        resource_id: ResourceId,
++        width: u32,
++        height: u32,
++    ) -> anyhow::Result<()> {
++        let request = Dma::new(ResourceFlush::new(
++            resource_id,
++            GpuRect::new(0, 0, width, height),
++        ))?;
++        let header = self.send_request(request).await?;
++        anyhow::ensure!(
++            header.ty == CommandTy::RespOkNodata,
++            "resource_flush failed: {:?}",
++            header.ty
++        );
++        Ok(())
++    }
++
++    async fn initialize(&mut self) -> anyhow::Result<()> {
++        let mut capset = None;
++        for index in 0..self.num_capsets.max(1) {
++            let info = self.get_capset_info(index).await?;
++            log::info!(
++                "quanta-gpud: capset {index}: id={} version={} size={}",
++                info.capset_id,
++                info.capset_max_version,
++                info.capset_max_size
++            );
++            if info.capset_id == VIRTIO_GPU_CAPSET_VIRGL
++                || info.capset_id == VIRTIO_GPU_CAPSET_VIRGL2
++            {
++                capset = Some(info.capset_id);
++                break;
++            }
++        }
++        anyhow::ensure!(capset.is_some(), "no virgl capset found");
++
++        let display_info = self.get_display_info().await?;
++        let first = &display_info.display_info[0];
++        let (width, height) = if first.rect.width > 0 && first.rect.height > 0 {
++            (first.rect.width, first.rect.height)
++        } else {
++            (1024, 768)
++        };
++        log::info!("quanta-gpud: display 0 is {width}x{height}");
++
++        self.ctx_create().await?;
++        let resource_id = self.resource_create_3d(width, height).await?;
++        self.ctx_attach_resource(resource_id).await?;
++        self.set_scanout(resource_id, width, height).await?;
++
++        let commands =
++            virgl_clear_commands(resource_id, width, height, [0.06, 0.22, 0.60, 1.0]);
++        self.submit_3d(&commands).await?;
++        self.flush(resource_id, width, height).await?;
++
++        log::info!("quanta-gpud: virgl clear submitted for resource {resource_id:?}");
++        Ok(())
++    }
++}
++
++fn virgl_cmd0(cmd: u32, obj: u32, len: u32) -> u32 {
++    cmd | (obj << 8) | (len << 16)
++}
++
++fn push_virgl_cmd(out: &mut Vec<u32>, cmd: u32, obj: u32, payload: &[u32]) {
++    out.push(virgl_cmd0(cmd, obj, payload.len() as u32));
++    out.extend_from_slice(payload);
++}
++
++fn virgl_clear_commands(
++    resource_id: ResourceId,
++    width: u32,
++    height: u32,
++    color: [f32; 4],
++) -> Vec<u32> {
++    let mut out = Vec::new();
++
++    push_virgl_cmd(
++        &mut out,
++        VIRGL_CCMD_CREATE_OBJECT,
++        VIRGL_OBJECT_SURFACE,
++        &[
++            QUANTA_SURFACE_HANDLE,
++            resource_id.0,
++            VIRGL_FORMAT_B8G8R8A8_UNORM,
++            0,
++            0,
++        ],
++    );
++    push_virgl_cmd(
++        &mut out,
++        VIRGL_CCMD_SET_FRAMEBUFFER_STATE,
++        0,
++        &[1, 0, QUANTA_SURFACE_HANDLE],
++    );
++
++    let mut viewport = vec![0u32];
++    for value in [
++        width as f32 / 2.0,
++        height as f32 / 2.0,
++        1.0,
++        width as f32 / 2.0,
++        height as f32 / 2.0,
++        0.0,
++    ] {
++        viewport.push(value.to_bits());
++    }
++    push_virgl_cmd(&mut out, VIRGL_CCMD_SET_VIEWPORT_STATE, 0, &viewport);
++
++    let mut clear = vec![PIPE_CLEAR_COLOR0];
++    for value in color {
++        clear.push(value.to_bits());
++    }
++    clear.extend_from_slice(&[0, 0, 0]);
++    push_virgl_cmd(&mut out, VIRGL_CCMD_CLEAR, 0, &clear);
++
++    out
++}
++
++fn main() {
++    pcid_interface::pci_daemon(daemon_runner);
++}
++
++fn daemon_runner(daemon: daemon::Daemon, mut pcid_handle: PciFunctionHandle) -> ! {
++    common::setup_logging(
++        "graphics",
++        "pci",
++        "quanta-gpud",
++        common::output_level(),
++        common::file_level(),
++    );
++
++    let pci_config = pcid_handle.config();
++    assert_eq!(pci_config.func.full_device_id.device_id, 0x1050);
++    log::info!("quanta-gpud: starting");
++
++    let device = match virtio_core::probe_device(&mut pcid_handle) {
++        Ok(device) => device,
++        Err(err) => {
++            log::error!("quanta-gpud: probe_device failed: {err:?}");
++            std::process::exit(1);
++        }
++    };
++    let config = unsafe { &mut *(device.device_space as *mut GpuConfig) };
++
++    let has_virgl = device.transport.check_device_feature(VIRTIO_GPU_F_VIRGL);
++    if !has_virgl {
++        log::error!("quanta-gpud: virgl is not available on this device");
++        std::process::exit(1);
++    }
++    device.transport.ack_driver_feature(VIRTIO_GPU_F_VIRGL);
++    device.transport.finalize_features();
++
++    let control_queue = match device.setup_queue() {
++        Ok(queue) => queue,
++        Err(err) => {
++            log::error!("quanta-gpud: control queue setup failed: {err:?}");
++            std::process::exit(1);
++        }
++    };
++    if let Err(err) = device.setup_queue() {
++        log::error!("quanta-gpud: cursor queue setup failed: {err:?}");
++        std::process::exit(1);
++    }
++
++    device.transport.run_device();
++
++    let mut gpu = QuantaGpu {
++        control_queue,
++        num_capsets: config.num_capsets(),
++        _transport: device.transport.clone(),
++    };
++
++    match futures::executor::block_on(gpu.initialize()) {
++        Ok(()) => {
++            daemon.ready();
++            log::info!("quanta-gpud: ready");
++        }
++        Err(err) => {
++            log::error!("quanta-gpud: initialization failed: {err:?}");
++            std::process::exit(1);
++        }
++    }
++
++    loop {
++        std::thread::sleep(std::time::Duration::from_secs(3600));
++    }
++}

@@ -1,0 +1,514 @@
+diff --git a/drivers/graphics/virtio-gpud/src/main.rs b/drivers/graphics/virtio-gpud/src/main.rs
+index 0c2d4e5..33fd2eb 100644
+--- a/drivers/graphics/virtio-gpud/src/main.rs
++++ b/drivers/graphics/virtio-gpud/src/main.rs
+@@ -30,7 +30,7 @@ use virtio_core::utils::VolatileCell;
+ 
+ mod scheme;
+ 
+-//const VIRTIO_GPU_F_VIRGL: u32 = 0;
++const VIRTIO_GPU_F_VIRGL: u32 = 0;
+ const VIRTIO_GPU_F_EDID: u32 = 1;
+ //const VIRTIO_GPU_F_RESOURCE_UUID: u32 = 2;
+ //const VIRTIO_GPU_F_RESOURCE_BLOB: u32 = 3;
+@@ -39,6 +39,26 @@ const VIRTIO_GPU_F_EDID: u32 = 1;
+ const VIRTIO_GPU_EVENT_DISPLAY: u32 = 1 << 0;
+ const VIRTIO_GPU_MAX_SCANOUTS: usize = 16;
+ 
++const VIRTIO_GPU_CAPSET_VIRGL: u32 = 1;
++const VIRTIO_GPU_CAPSET_VIRGL2: u32 = 2;
++const VIRTIO_GPU_RESOURCE_FLAG_Y_0_TOP: u32 = 1 << 0;
++
++// Gallium/virgl constants used by the 3D path.
++const PIPE_TEXTURE_2D: u32 = 2;
++const VIRGL_FORMAT_B8G8R8A8_UNORM: u32 = 1;
++const VIRGL_BIND_RENDER_TARGET: u32 = 1 << 1;
++
++const QUANTA_CTX_ID: u32 = 1;
++const QUANTA_SURFACE_HANDLE: u32 = 1;
++
++// virgl command opcodes and object types (virgl_protocol.h).
++const VIRGL_CCMD_CREATE_OBJECT: u32 = 1;
++const VIRGL_CCMD_SET_VIEWPORT_STATE: u32 = 4;
++const VIRGL_CCMD_SET_FRAMEBUFFER_STATE: u32 = 5;
++const VIRGL_CCMD_CLEAR: u32 = 7;
++const VIRGL_OBJECT_SURFACE: u32 = 8;
++const PIPE_CLEAR_COLOR0: u32 = 1 << 0;
++
+ #[repr(C)]
+ pub struct GpuConfig {
+     /// Signals pending events to the driver.
+@@ -55,6 +75,11 @@ impl GpuConfig {
+     pub fn num_scanouts(&self) -> u32 {
+         self.num_scanouts.get()
+     }
++
++    #[inline]
++    pub fn num_capsets(&self) -> u32 {
++        self.num_capsets.get()
++    }
+ }
+ 
+ #[derive(Debug, Copy, Clone, PartialEq)]
+@@ -406,6 +431,155 @@ impl GetEdidResp {
+     }
+ }
+ 
++#[derive(Debug)]
++#[repr(C)]
++pub struct GetCapsetInfo {
++    pub header: ControlHeader,
++    pub capset_index: u32,
++    pub padding: u32,
++}
++
++impl GetCapsetInfo {
++    pub fn new(capset_index: u32) -> Self {
++        Self {
++            header: ControlHeader::with_ty(CommandTy::GetCapsetInfo),
++            capset_index,
++            padding: 0,
++        }
++    }
++}
++
++#[derive(Debug)]
++#[repr(C)]
++pub struct GetCapsetInfoResp {
++    pub header: ControlHeader,
++    pub capset_id: u32,
++    pub capset_max_version: u32,
++    pub capset_max_size: u32,
++    pub padding: u32,
++}
++
++impl Default for GetCapsetInfoResp {
++    fn default() -> Self {
++        Self {
++            header: ControlHeader::default(),
++            capset_id: 0,
++            capset_max_version: 0,
++            capset_max_size: 0,
++            padding: 0,
++        }
++    }
++}
++
++#[derive(Debug)]
++#[repr(C)]
++pub struct CtxCreate {
++    pub header: ControlHeader,
++    pub nlen: u32,
++    pub context_init: u32,
++    pub debug_name: [u8; 64],
++}
++
++impl CtxCreate {
++    pub fn new(ctx_id: u32, name: &[u8]) -> Self {
++        let mut debug_name = [0u8; 64];
++        let len = name.len().min(debug_name.len());
++        debug_name[..len].copy_from_slice(&name[..len]);
++        Self {
++            header: ControlHeader {
++                ty: CommandTy::CtxCreate,
++                ctx_id,
++                ..Default::default()
++            },
++            nlen: len as u32,
++            context_init: 0,
++            debug_name,
++        }
++    }
++}
++
++#[derive(Debug)]
++#[repr(C)]
++pub struct CtxResource {
++    pub header: ControlHeader,
++    pub resource_id: ResourceId,
++    pub padding: u32,
++}
++
++impl CtxResource {
++    pub fn attach(ctx_id: u32, resource_id: ResourceId) -> Self {
++        Self {
++            header: ControlHeader {
++                ty: CommandTy::CtxAttachResource,
++                ctx_id,
++                ..Default::default()
++            },
++            resource_id,
++            padding: 0,
++        }
++    }
++}
++
++#[derive(Debug)]
++#[repr(C)]
++pub struct ResourceCreate3d {
++    pub header: ControlHeader,
++    pub resource_id: ResourceId,
++    pub target: u32,
++    pub format: u32,
++    pub bind: u32,
++    pub width: u32,
++    pub height: u32,
++    pub depth: u32,
++    pub array_size: u32,
++    pub last_level: u32,
++    pub nr_samples: u32,
++    pub flags: u32,
++    pub padding: u32,
++}
++
++impl ResourceCreate3d {
++    pub fn new(resource_id: ResourceId, width: u32, height: u32) -> Self {
++        Self {
++            header: ControlHeader::with_ty(CommandTy::ResourceCreate3d),
++            resource_id,
++            target: PIPE_TEXTURE_2D,
++            format: VIRGL_FORMAT_B8G8R8A8_UNORM,
++            bind: VIRGL_BIND_RENDER_TARGET,
++            width,
++            height,
++            depth: 1,
++            array_size: 1,
++            last_level: 0,
++            nr_samples: 0,
++            flags: VIRTIO_GPU_RESOURCE_FLAG_Y_0_TOP,
++            padding: 0,
++        }
++    }
++}
++
++#[derive(Debug)]
++#[repr(C)]
++pub struct CmdSubmit3d {
++    pub header: ControlHeader,
++    pub size: u32,
++    pub padding: u32,
++}
++
++impl CmdSubmit3d {
++    pub fn new(ctx_id: u32, size: u32) -> Self {
++        Self {
++            header: ControlHeader {
++                ty: CommandTy::Submit3d,
++                ctx_id,
++                ..Default::default()
++            },
++            size,
++            padding: 0,
++        }
++    }
++}
++
+ #[derive(Debug)]
+ #[repr(C)]
+ pub struct CursorPos {
+@@ -520,6 +694,11 @@ fn daemon(daemon: daemon::Daemon, mut pcid_handle: PciFunctionHandle) -> anyhow:
+     if has_edid {
+         device.transport.ack_driver_feature(VIRTIO_GPU_F_EDID);
+     }
++    let has_virgl = device.transport.check_device_feature(VIRTIO_GPU_F_VIRGL);
++    if has_virgl {
++        device.transport.ack_driver_feature(VIRTIO_GPU_F_VIRGL);
++        log::info!("virtio-gpu: virgl 3D support available");
++    }
+     device.transport.finalize_features();
+ 
+     // Queue for sending control commands.
+@@ -546,6 +725,7 @@ fn daemon(daemon: daemon::Daemon, mut pcid_handle: PciFunctionHandle) -> anyhow:
+         cursor_queue.clone(),
+         device.transport.clone(),
+         has_edid,
++        has_virgl,
+     )?;
+     daemon.ready();
+ 
+diff --git a/drivers/graphics/virtio-gpud/src/scheme.rs b/drivers/graphics/virtio-gpud/src/scheme.rs
+index f4c5a7a..fefbb1a 100644
+--- a/drivers/graphics/virtio-gpud/src/scheme.rs
++++ b/drivers/graphics/virtio-gpud/src/scheme.rs
+@@ -92,6 +92,10 @@ pub struct VirtGpuAdapter<'a> {
+     cursor_queue: Arc<Queue>,
+     transport: Arc<dyn Transport>,
+     has_edid: bool,
++    has_virgl: bool,
++    virgl_capset: Option<u32>,
++    quanta_resource: Option<ResourceId>,
++    quanta_active: bool,
+     unref_tx: Sender<ResourceId>,
+     unref_rx: Receiver<ResourceId>,
+     displays: Vec<Display>,
+@@ -358,6 +362,231 @@ impl<'a> VirtGpuAdapter<'a> {
+         self.update_cursor(&hidden_cursor, scanout_id, 0, 0, 0, 0)
+             .await;
+     }
++
++    async fn get_capset_info(&self, index: u32) -> anyhow::Result<GetCapsetInfoResp> {
++        let request = Dma::new(GetCapsetInfo::new(index))?;
++        let response = Dma::new(GetCapsetInfoResp::default())?;
++        let command = ChainBuilder::new()
++            .chain(Buffer::new(request))
++            .chain(Buffer::new(response).flags(DescriptorFlags::WRITE_ONLY))
++            .build();
++        let (_, [_, response]) = self.control_queue.send(command).await.into_parts();
++        let response: Dma<GetCapsetInfoResp> = response.into_inner();
++        anyhow::ensure!(
++            response.header.ty == CommandTy::RespOkCapsetInfo,
++            "get_capset_info({index}) failed: {:?}",
++            response.header.ty
++        );
++        Ok(response)
++    }
++
++    async fn ctx_create(&self) -> anyhow::Result<()> {
++        let request = Dma::new(CtxCreate::new(QUANTA_CTX_ID, b"quanta-gpu"))?;
++        let header = self.send_request(request).await?;
++        anyhow::ensure!(
++            header.ty == CommandTy::RespOkNodata,
++            "ctx_create failed: {:?}",
++            header.ty
++        );
++        Ok(())
++    }
++
++    async fn resource_create_3d(
++        &mut self,
++        width: u32,
++        height: u32,
++    ) -> anyhow::Result<ResourceId> {
++        let resource_id = ResourceId::alloc();
++        let request = Dma::new(ResourceCreate3d::new(resource_id, width, height))?;
++        let header = self.send_request(request).await?;
++        anyhow::ensure!(
++            header.ty == CommandTy::RespOkNodata,
++            "resource_create_3d failed: {:?}",
++            header.ty
++        );
++        Ok(resource_id)
++    }
++
++    async fn ctx_attach_resource(&mut self, resource_id: ResourceId) -> anyhow::Result<()> {
++        let request = Dma::new(CtxResource::attach(QUANTA_CTX_ID, resource_id))?;
++        let header = self.send_request(request).await?;
++        anyhow::ensure!(
++            header.ty == CommandTy::RespOkNodata,
++            "ctx_attach_resource failed: {:?}",
++            header.ty
++        );
++        Ok(())
++    }
++
++    async fn submit_3d(&self, commands: &[u32]) -> anyhow::Result<()> {
++        let byte_len = commands.len() * 4;
++        let request = Dma::new(CmdSubmit3d::new(QUANTA_CTX_ID, byte_len as u32))?;
++        let mut bytes = unsafe { Dma::zeroed_slice::<u8>(byte_len)?.assume_init() };
++        for (index, word) in commands.iter().enumerate() {
++            bytes[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
++        }
++        let response = Dma::new(ControlHeader::default())?;
++        let command = ChainBuilder::new()
++            .chain(Buffer::new(request))
++            .chain(Buffer::new(bytes))
++            .chain(Buffer::new(response).flags(DescriptorFlags::WRITE_ONLY))
++            .build();
++        let (_, [_, _, header]) = self.control_queue.send(command).await.into_parts();
++        let header: Dma<ControlHeader> = header.into_inner();
++        anyhow::ensure!(
++            header.ty == CommandTy::RespOkNodata,
++            "submit_3d failed: {:?}",
++            header.ty
++        );
++        Ok(())
++    }
++
++    /// First bring-up test: create a virgl context and a 3D scanout resource,
++    /// then clear it with a Rust-encoded virgl command buffer.
++    fn quanta_test(&mut self) {
++        if !self.has_virgl {
++            return;
++        }
++        let result = futures::executor::block_on(async {
++            let mut capset = None;
++            for index in 0..self.config.num_capsets().max(1) {
++                let info = self.get_capset_info(index).await?;
++                log::info!(
++                    "virtio-gpu: capset {index}: id={} version={} size={}",
++                    info.capset_id,
++                    info.capset_max_version,
++                    info.capset_max_size
++                );
++                if info.capset_id == VIRTIO_GPU_CAPSET_VIRGL
++                    || info.capset_id == VIRTIO_GPU_CAPSET_VIRGL2
++                {
++                    capset = Some(info.capset_id);
++                    break;
++                }
++            }
++            let Some(capset) = capset else {
++                anyhow::bail!("no virgl capset found");
++            };
++            self.virgl_capset = Some(capset);
++
++            let Some(display) = self.displays.first() else {
++                anyhow::bail!("no display");
++            };
++            let width = display.width;
++            let height = display.height;
++            if width == 0 || height == 0 {
++                anyhow::bail!("display has no mode");
++            }
++
++            self.ctx_create().await?;
++            let resource_id = self.resource_create_3d(width, height).await?;
++            self.ctx_attach_resource(resource_id).await?;
++
++            let scanout = SetScanout::new(
++                0,
++                resource_id,
++                GpuRect::new(0, 0, width, height),
++            );
++            let header = self.send_request(Dma::new(scanout)?).await?;
++            anyhow::ensure!(
++                header.ty == CommandTy::RespOkNodata,
++                "set_scanout failed: {:?}",
++                header.ty
++            );
++            self.displays[0].active_resource = Some(resource_id);
++
++            let commands = virgl_clear_commands(
++                resource_id,
++                width,
++                height,
++                [0.08, 0.20, 0.55, 1.0],
++            );
++            self.submit_3d(&commands).await?;
++
++            let flush = ResourceFlush::new(resource_id, GpuRect::new(0, 0, width, height));
++            let header = self.send_request(Dma::new(flush)?).await?;
++            anyhow::ensure!(
++                header.ty == CommandTy::RespOkNodata,
++                "resource_flush failed: {:?}",
++                header.ty
++            );
++
++            self.quanta_resource = Some(resource_id);
++            anyhow::Ok(())
++        });
++
++        match result {
++            Ok(()) => {
++                self.quanta_active = true;
++                log::info!("virtio-gpu: QuantaGPU virgl test enabled");
++            }
++            Err(err) => log::error!("virtio-gpu: QuantaGPU virgl test failed: {err:?}"),
++        }
++    }
++}
++
++fn virgl_cmd0(cmd: u32, obj: u32, len: u32) -> u32 {
++    cmd | (obj << 8) | (len << 16)
++}
++
++fn push_virgl_cmd(out: &mut Vec<u32>, cmd: u32, obj: u32, payload: &[u32]) {
++    out.push(virgl_cmd0(cmd, obj, payload.len() as u32));
++    out.extend_from_slice(payload);
++}
++
++fn virgl_clear_commands(
++    resource_id: ResourceId,
++    width: u32,
++    height: u32,
++    color: [f32; 4],
++) -> Vec<u32> {
++    let mut out = Vec::new();
++
++    // Create a surface object for the render target.
++    push_virgl_cmd(
++        &mut out,
++        VIRGL_CCMD_CREATE_OBJECT,
++        VIRGL_OBJECT_SURFACE,
++        &[
++            QUANTA_SURFACE_HANDLE,
++            resource_id.0,
++            VIRGL_FORMAT_B8G8R8A8_UNORM,
++            0,
++            0,
++        ],
++    );
++
++    // Bind the surface as color buffer 0.
++    push_virgl_cmd(
++        &mut out,
++        VIRGL_CCMD_SET_FRAMEBUFFER_STATE,
++        0,
++        &[1, 0, QUANTA_SURFACE_HANDLE],
++    );
++
++    // Fullscreen viewport in framebuffer pixels.
++    let mut viewport = vec![0u32];
++    for value in [
++        width as f32 / 2.0,
++        height as f32 / 2.0,
++        1.0,
++        width as f32 / 2.0,
++        height as f32 / 2.0,
++        0.0,
++    ] {
++        viewport.push(value.to_bits());
++    }
++    push_virgl_cmd(&mut out, VIRGL_CCMD_SET_VIEWPORT_STATE, 0, &viewport);
++
++    // Clear color 0 to the requested RGBA value.
++    let mut clear = vec![PIPE_CLEAR_COLOR0];
++    for value in color {
++        clear.push(value.to_bits());
++    }
++    clear.extend_from_slice(&[0, 0, 0]); // depth (double), stencil
++    push_virgl_cmd(&mut out, VIRGL_CCMD_CLEAR, 0, &clear);
++
++    out
+ }
+ 
+ impl<'a> GraphicsAdapter for VirtGpuAdapter<'a> {
+@@ -392,6 +621,8 @@ impl<'a> GraphicsAdapter for VirtGpuAdapter<'a> {
+ 
+             objects.add_connector(VirtGpuConnector { scanout_id }, (), &[crtc]);
+         }
++
++        self.quanta_test();
+     }
+ 
+     fn get_unique(&self) -> String {
+@@ -472,6 +703,10 @@ impl<'a> GraphicsAdapter for VirtGpuAdapter<'a> {
+         new_plane_state: KmsPlaneState<Self>,
+         damage: Option<Damage>,
+     ) -> syscall::Result<()> {
++        if self.quanta_active {
++            // QuantaGPU owns the scanout while its virgl test is active.
++            return Ok(());
++        }
+         futures::executor::block_on(async {
+             let Some(crtc_id) = new_plane_state.crtc_id else {
+                 // FIXME disable output?
+@@ -593,6 +828,7 @@ impl<'a> GpuScheme {
+         cursor_queue: Arc<Queue>,
+         transport: Arc<dyn Transport>,
+         has_edid: bool,
++        has_virgl: bool,
+     ) -> Result<GraphicsScheme<VirtGpuAdapter<'a>>, Error> {
+         let (unref_tx, unref_rx) = mpsc::channel();
+         let adapter = VirtGpuAdapter {
+@@ -602,6 +838,10 @@ impl<'a> GpuScheme {
+             cursor_queue,
+             transport,
+             has_edid,
++            has_virgl,
++            virgl_capset: None,
++            quanta_resource: None,
++            quanta_active: false,
+             unref_tx,
+             unref_rx,
+             displays: vec![],
