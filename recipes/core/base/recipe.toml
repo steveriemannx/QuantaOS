@@ -2,7 +2,7 @@
 description = "Essential system components and drivers for Redox"
 
 [source]
-git = "https://gitlab.redox-os.org/redox-os/base.git"
+path = "/run/media/shxu/datalinux/scratch/base"
 
 [build]
 template = "custom"

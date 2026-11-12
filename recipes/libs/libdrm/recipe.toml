@@ -17,8 +17,5 @@ mesonflags = [
     "-Dinstall-test-programs=true",
 ]
 
-[[optional-packages]]
-name = "tests"
-files = [
-    "usr/bin/*",
-]
+# NOTE: optional tests split removed temporarily for a binary-only test image
+# build. Restore from the original recipe after testing.

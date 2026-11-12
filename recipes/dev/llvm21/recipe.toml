@@ -81,18 +81,5 @@ COOKBOOK_SOURCE="$COOKBOOK_SOURCE/llvm"
 cookbook_cmake
 """
 
-# llvm runtime
-[[optional-packages]]
-name = "runtime"
-files = [
-    "usr/bin/**",
-]
-
-[[optional-packages]]
-name = "dev"
-dependencies = [ ".runtime" ]
-files = [
-    "usr/include/llvm*/**",
-    "usr/lib/libLLVM*.a",
-    "usr/lib/cmake/llvm/**",
-]
+# NOTE: optional runtime/dev split removed temporarily for a binary-only test
+# image build. Restore from the original recipe after testing.
