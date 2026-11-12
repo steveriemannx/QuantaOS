@@ -1,0 +1,9 @@
+[package]
+name = "quanta-demo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Fullscreen QuantaGPU v0 present-path demo"
+
+[dependencies]
+quanta-gpu-client.workspace = true

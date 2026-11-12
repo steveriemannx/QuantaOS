@@ -24,3 +24,6 @@ source.tar
 source.tar.tmp
 target
 wget-log
+
+# Workspace-local Rust target installation (read-only host $HOME)
+/.rustup/

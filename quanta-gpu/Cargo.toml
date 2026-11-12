@@ -1,6 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["protocol"]
+members = ["protocol", "raster", "client", "gpud", "demo"]
+# Host tests cover the dependency-free protocol and raster crates. The client,
+# driver and demo are Redox-only and are built by the cookbook recipe for the
+# Redox target.
+default-members = ["protocol", "raster"]
 
 [workspace.package]
 version = "0.1.0"
@@ -9,3 +13,10 @@ license = "MIT"
 
 [workspace.dependencies]
 quanta-gpu-protocol = { path = "protocol" }
+quanta-gpu-raster = { path = "raster" }
+quanta-gpu-client = { path = "client" }
+libredox = "0.2.0"
+redox-scheme = { git = "https://gitlab.redox-os.org/redox-os/redox-scheme.git" }
+redox_syscall = { version = "0.9.5", features = ["std"] }
+drm = "0.15.0"
+anyhow = "1"

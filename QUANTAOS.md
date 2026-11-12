@@ -112,8 +112,15 @@ image given the Phase 4 Rust/MIT scope.
 
 Keep improving the all-Rust route: protocol, driver and client in Rust, **no C**, no
 Vulkan. Keep it narrow — one simple device, one scanout, one client model — and do
-not generalize yet. Design and v0 scope: [`QUANTAOS_GPU.md`](QUANTAOS_GPU.md). Start
-with the virtio-gpu 2D present path (v0); virgl (v1) is optional and later.
+not generalize yet. Design and v0 scope: [`QUANTAOS_GPU.md`](QUANTAOS_GPU.md).
+
+Implemented: the versioned protocol with `DeviceInfo` feature advertisement and
+fence acknowledgements; `quanta-gpu-raster`, a pure-Rust SDF executor for the v1
+`Clear`/`Rect`/`Shadow`/`Glyph`/`Atlas` records; `quanta-gpud` executing those
+records and flipping the virtio-gpu 2D scanout; the client `frame()` API; and a
+`quanta-demo` with `--v1` (driver executes protocol records) and `--surface`
+(client rasterizes) modes. Next: boot the `quanta-gpu` test image in QEMU and
+wire `ferritic-quanta` to the client. virgl stays optional and later.
 
 ## Environment notes
 

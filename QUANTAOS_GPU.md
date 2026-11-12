@@ -6,6 +6,12 @@ general-purpose GPU stack: exactly one simple device, one scanout, one client mo
 
 This document is the design baseline. It is deliberately narrower than Vulkan/DRM.
 
+Status (2026-11-12): the v0 present path and the v1 pure-Rust render path are
+implemented. `quanta-gpud` executes `Clear`/`Rect`/`Shadow`/`Glyph`/`Atlas`
+records with `quanta-gpu-raster` (SDF rasterizer, no C, no Vulkan), and the
+driver advertises that through the `render` feature in `info`. The virgl
+executor is still optional and not required for a working image.
+
 ## 1. What "pure Rust GPU protocol" means here
 
 Three layers, all Rust:
@@ -14,10 +20,11 @@ Three layers, all Rust:
 FerriticUI (ferritic-core Scene)
         │  encodes commands with quanta-gpu-protocol
         ▼
-ferritic-quanta                       (client backend, Rust library)
+ferritic-quanta / quanta-gpu-client   (client backend, Rust library)
         │  /scheme/quanta-gpu  (Rust-defined command format, shared memory)
         ▼
 quanta-gpud                           (userspace driver / display service, Rust)
+        ├─ quanta-gpu-raster           (pure-Rust v1 executor: SDF/glyph)
         │  virtio-gpu 2D (and later virgl 3D) encoded in Rust
         ▼
 virtio-gpud (existing, pure Rust)  →  QEMU / Cloud Hypervisor / virtio hardware
@@ -27,6 +34,9 @@ virtio-gpud (existing, pure Rust)  →  QEMU / Cloud Hypervisor / virtio hardwar
   format, no `bindgen`, no `libc`, no `drm` FFI, no Vulkan.
 * `quanta-gpud` is a normal Redox userspace driver. It owns the display through the
   existing pure-Rust `virtio-gpud` display scheme and serves `/scheme/quanta-gpu`.
+* `quanta-gpu-raster` is the dependency-free reference executor for the v1 draw
+  records. It gives the protocol testable semantics on the host and a working
+  render path on machines without virgl.
 * `ferritic-quanta` is the FerriticUI backend. It converts `Prim::Rect`,
   `Prim::Shadow` and `Prim::Glyph` into QuantaGPU commands.
 
@@ -59,14 +69,17 @@ Consequences:
 ## 3. Protocol v0 — present path (works on virtio-gpu 2D)
 
 v0 makes `ferritic-quanta` a fullscreen client of a minimal display service.
-Frames are rasterized by `ferritic-soft` into a shared RGBA8 surface; the driver
+Frames are rasterized by `ferritic-soft` into a shared `argb8888` surface; the driver
 only transfers damage and flips. This is the shortest path to an all-Rust image and
 is testable in QEMU today.
 
 ### Transport
 
 * `/scheme/quanta-gpu/info` — read-only device description:
-  width, height, stride, format, scale.
+  width, height, stride, format, scale, and a `features` list. `present` is
+  mandatory; `render` means the driver executes the v1 draw records; `submit`
+  means a raw backend stream is accepted. Unknown features are ignored, and an
+  older driver without the key is treated as `present` only.
 * `/scheme/quanta-gpu/fb` — mmap RW; the scanout surface (one fullscreen
   surface in v0).
 * `/scheme/quanta-gpu/ctl` — write a `Present` batch; read fences/VT events.
@@ -107,7 +120,8 @@ Ops (v0)
 
 Rules: unknown ops are skipped; a frame is applied atomically at `Present`;
 damage is intersected with the surface; `seq` must increase; malformed frames are
-rejected without touching the scanout.
+rejected without touching the scanout. Drivers validate the header and surface
+before executing any draw operation (`peek_frame_info`).
 
 ### Driver implementation
 
@@ -123,7 +137,15 @@ rejected without touching the scanout.
 `ferritic-quanta` maps one surface, runs `ferritic-soft::SoftRenderer` into it,
 and calls `Present`. No Vulkan, no Orbital, no C.
 
-## 4. Protocol v1 — GPU render path (virgl, no Vulkan)
+### Driver fence acknowledgements
+
+Every successful `Present` queues a fence token on `/scheme/quanta-gpu/ctl`:
+the explicit `Fence` token if the frame carried one, otherwise the frame `seq`.
+Clients read one `u64` per `read`; the queue is bounded so a client that never
+reads cannot grow driver memory without limit. This gives clients a simple way
+to throttle without inventing a timing protocol.
+
+## 4. Protocol v1 — render path (pure-Rust executor now, virgl later)
 
 The same protocol gains a render layer; the driver chooses where to execute it.
 The command types are already encoded by the protocol crate.
@@ -141,15 +163,33 @@ Ops (v1)
   15 Submit   { backend_id u32, bytes }   // raw backend stream, e.g. virgl
 ```
 
-These commands are exactly the three `Prim` variants FerriticUI emits. A GPU
-executor can implement them with one shader family:
+`Submit` is ignored by the current software executor; a virgl driver will
+advertise the `submit` feature and execute it.
 
-* Rectangle/shadow: instanced quad + SDF fragment shader (same math as
-  `ferritic-soft`/`ferritic-blade`).
-* Glyph: textured quad sampling the A8 atlas.
-* Scissor: clip rectangle in the instance data.
+These commands are exactly the three `Prim` variants FerriticUI emits.
+
+### Software executor (implemented)
+
+[`quanta-gpu-raster`](quanta-gpu/raster/src/lib.rs) is the reference
+implementation. It is used by `quanta-gpud` when the `render` feature is
+advertised, and by host tests as the semantic definition of the draw records:
+
+* Rectangle/shadow: the same SDF and 1px analytic AA as `ferritic-soft`.
+* Glyph: textured quad sampling the persistent A8 atlas with bilinear filtering.
+* Scissor: the clip rectangle intersects both the drawn pixels and the damage
+  reported to the scanout path.
+* Damage is computed per primitive, unioned with the frame's explicit `Present`
+  damage, clipped to the surface, and capped like a protocol damage list.
+
+The executor is pure Rust and `#![forbid(unsafe_code)]`. It is not a GPU
+shader, but it makes the wire protocol complete and testable today; the same
+records can later be executed by the virgl backend without changing clients.
+
+### virgl executor (optional)
 
 ### virgl executor
+
+The following work is only needed to move the same commands onto the GPU:
 
 * Extend the pure-Rust virtio-gpu driver to negotiate `VIRTIO_GPU_F_VIRGL`, create
   a 3D context (capset 1), and submit Gallium command buffers. The existing driver
@@ -167,6 +207,7 @@ also the largest work item; it is *not* required for an all-Rust image.
 | Phase | Deliverable | GPU renders? | Verifiable here? |
 |---|---|---|---|
 | v0 | protocol crate + `quanta-gpud` 2D + `ferritic-quanta` + fullscreen demo | no (scanout only) | yes, QEMU `gpu=virtio` + screendump |
+| v1s | `quanta-gpu-raster` executes Clear/Rect/Shadow/Glyph/Atlas in `quanta-gpud`; client `frame()` API; `quanta-demo` renders the scene with protocol records | no (driver CPU, GPU-shaped commands) | yes, host tests + QEMU |
 | v1a | virgl driver bring-up: clear screen via a Rust virgl command buffer | yes | requires host virglrenderer; installable (247 KB) |
 | v1b | SDF/glyph shaders + draw commands; FerriticUI on GPU | yes | host virglrenderer + NVIDIA/EGL |
 | v2 | input/window model (multiple surfaces or Orbital integration) | — | QEMU |
@@ -174,19 +215,22 @@ also the largest work item; it is *not* required for an all-Rust image.
 ## 6. Tests
 
 * Host: protocol encode/decode round-trip, malformed-input rejection, sequencing,
-  damage clipping.
-* QEMU: boot with `gpu=virtio`, run the fullscreen demo, capture the framebuffer
-  via the QEMU monitor (`screendump`) and compare against `ferritic-soft` golden
-  output.
-* v1: a Rust guest test that submits a minimal virgl clear/draw and verifies the
-  screendump; then the Ferritic SDF/glyph golden set.
+  damage clipping, device-info parsing and feature advertisement.
+* Host: `quanta-gpu-raster` pixel tests for fills, borders, rounded-corner AA,
+  shadow falloff, clip, stride padding, glyph sampling, scale and damage.
+* QEMU: boot with `gpu=virtio`, run `quanta-demo --v1` and `--surface`, capture
+  the framebuffer via the QEMU monitor (`screendump`) and compare the two paths.
+* v1 virgl: a Rust guest test that submits a minimal virgl clear/draw and
+  verifies the screendump; then the Ferritic SDF/glyph golden set.
 
 ## 7. Open decision
 
 The protocol and the all-Rust goal are identical in v0 and v1. The only fork is
 whether the GPU must execute the shading:
 
-* **v0 first** (recommended): ship the Rust protocol + driver + backend on
-  virtio-gpu 2D now; keep `Draw`/`Submit` in the protocol for v1.
-* **v1 first**: start with the virgl executor; accept the C host dependency and a
-  much longer path to a booting demo.
+* **v0 + v1 software** (chosen): ship the Rust protocol, driver, client and
+  reference executor on virtio-gpu 2D now. This is an all-Rust image with a
+  GPU-shaped command protocol, and it boots today. Keep `Submit` for virgl.
+* **virgl next** (optional): move the same draw records onto the GPU. It adds
+  the C host dependency (virglrenderer) and is the only route to real GPU
+  shading without Vulkan, but it is not required for the all-Rust image.

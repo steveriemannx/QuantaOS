@@ -1,0 +1,10 @@
+[package]
+name = "quanta-gpu-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Client for the QuantaGPU display scheme"
+
+[dependencies]
+quanta-gpu-protocol.workspace = true
+libredox.workspace = true

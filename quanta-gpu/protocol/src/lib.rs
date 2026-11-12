@@ -6,12 +6,13 @@
 //!
 //! # Layers
 //!
-//! * **Presentation (v0).** A client renders into a driver-provided RGBA8
-//!   surface and submits a damage list. This runs on virtio-gpu 2D hardware,
+//! * **Presentation (v0).** A client renders into a driver-provided
+//!   `argb8888` surface and submits a damage list. This runs on virtio-gpu 2D hardware,
 //!   whose command set has no draw operations.
 //! * **Rendering (v1).** The same frame may carry primitives
-//!   ([`RectCmd`], [`ShadowCmd`], [`GlyphCmd`]) that a GPU executor can render
-//!   with a small shader family. The driver chooses where to execute them.
+//!   ([`RectCmd`], [`ShadowCmd`], [`GlyphCmd`]) that the driver can execute
+//!   with the pure-Rust reference rasterizer, or with a future virgl backend.
+//!   [`DeviceInfo::features`] advertises whether the driver implements them.
 //!
 //! # Encoding
 //!
@@ -49,6 +50,9 @@ pub const HEADER_LEN: usize = 40;
 pub const MAX_FRAME_LEN: usize = 32 * 1024 * 1024;
 /// Upper bound on one damage list.
 pub const MAX_DAMAGE: usize = 256;
+/// Upper bound on records in one frame. A frame with more records would cost
+/// more memory to validate than its wire size suggests.
+pub const MAX_RECORDS: usize = 1 << 16;
 /// Upper bound on one atlas upload.
 pub const MAX_ATLAS_BYTES: usize = 16 * 1024 * 1024;
 /// Upper bound on one raw backend submission.
@@ -82,6 +86,278 @@ impl Rgba8 {
         Self { r, g, b, a }
     }
 }
+
+/// Pixel layout of the shared surface.
+///
+/// The scanout is little-endian `B8G8R8A8_UNORM`, which in memory is the same
+/// as `0xAARRGGBB` (`argb8888`). Clients write pixels as `u32::to_le_bytes`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Format {
+    /// 32-bit `0xAARRGGBB`.
+    Argb8888,
+}
+
+impl Format {
+    /// Stable name used in `/scheme/quanta-gpu/info`.
+    pub const ARGB8888_NAME: &'static str = "argb8888";
+
+    /// Bytes per pixel in memory.
+    pub const fn bytes_per_pixel(self) -> usize {
+        match self {
+            Format::Argb8888 => 4,
+        }
+    }
+
+    /// Stable name used in `/scheme/quanta-gpu/info`.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Format::Argb8888 => Self::ARGB8888_NAME,
+        }
+    }
+}
+
+/// Optional protocol features advertised in `/scheme/quanta-gpu/info`.
+///
+/// `present` is mandatory. `render` means the driver executes the v1 draw
+/// records (`Clear`, `Rect`, `Shadow`, `Glyph`, `Atlas`); without it a client
+/// must rasterize into the surface itself. `submit` means raw backend streams
+/// are accepted (a future virgl executor).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Features(u32);
+
+impl Features {
+    pub const PRESENT: Self = Self(1 << 0);
+    pub const RENDER: Self = Self(1 << 1);
+    pub const SUBMIT: Self = Self(1 << 2);
+
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// Parses a comma-separated feature list. Unknown names are ignored so a
+    /// newer driver can add features without breaking older clients.
+    pub fn parse(text: &str) -> Self {
+        let mut features = Self::empty();
+        for name in text.split(',') {
+            let name = name.trim();
+            features = features.union(match name {
+                "present" => Self::PRESENT,
+                "render" => Self::RENDER,
+                "submit" => Self::SUBMIT,
+                _ => Self::empty(),
+            });
+        }
+        features
+    }
+
+    /// Stable comma-separated list for `DeviceInfo::to_text`.
+    pub fn to_text(self) -> String {
+        let mut names = Vec::new();
+        if self.contains(Self::PRESENT) {
+            names.push("present");
+        }
+        if self.contains(Self::RENDER) {
+            names.push("render");
+        }
+        if self.contains(Self::SUBMIT) {
+            names.push("submit");
+        }
+        names.join(",")
+    }
+}
+
+/// Device description served by `/scheme/quanta-gpu/info`.
+///
+/// The on-disk form is a small `key=value` text file. Keeping the parser in
+/// this crate means the client and the driver cannot disagree about defaults,
+/// required fields or unknown keys.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DeviceInfo {
+    pub version: u16,
+    /// Physical pixels.
+    pub width: u32,
+    /// Physical pixels.
+    pub height: u32,
+    /// Bytes per row, including padding.
+    pub stride: u32,
+    /// Logical-to-physical scale.
+    pub scale: f32,
+    pub format: Format,
+    /// Protocol features the driver implements.
+    pub features: Features,
+}
+
+impl DeviceInfo {
+    /// Builds a description after checking every invariant.
+    pub fn new(
+        version: u16,
+        width: u32,
+        height: u32,
+        stride: u32,
+        scale: f32,
+        format: Format,
+        features: Features,
+    ) -> Result<Self, InfoError> {
+        let info = Self {
+            version,
+            width,
+            height,
+            stride,
+            scale,
+            format,
+            features,
+        };
+        info.validate()?;
+        Ok(info)
+    }
+
+    /// Checks the fields a client relies on before it maps the surface.
+    pub fn validate(&self) -> Result<(), InfoError> {
+        if self.version != VERSION {
+            return Err(InfoError::UnsupportedVersion(self.version));
+        }
+        if self.width == 0 || self.height == 0 {
+            return Err(InfoError::InvalidGeometry);
+        }
+        if !self.scale.is_finite() || self.scale <= 0.0 {
+            return Err(InfoError::InvalidGeometry);
+        }
+        let row = self
+            .width
+            .checked_mul(self.format.bytes_per_pixel() as u32)
+            .ok_or(InfoError::InvalidGeometry)?;
+        if self.stride < row || !self.stride.is_multiple_of(4) {
+            return Err(InfoError::InvalidGeometry);
+        }
+        if !self.features.contains(Features::PRESENT) {
+            return Err(InfoError::MissingFeature("present"));
+        }
+        if self.surface_len().is_none() {
+            return Err(InfoError::InvalidGeometry);
+        }
+        Ok(())
+    }
+
+    /// Size of the `stride * height` mapping, if it fits in `usize`.
+    pub fn surface_len(&self) -> Option<usize> {
+        (self.stride as usize).checked_mul(self.height as usize)
+    }
+
+    /// Serializes the description in the format parsed by [`DeviceInfo::parse`].
+    pub fn to_text(&self) -> String {
+        format!(
+            "version={}\nwidth={}\nheight={}\nstride={}\nformat={}\nscale={}\nfeatures={}\n",
+            self.version,
+            self.width,
+            self.height,
+            self.stride,
+            self.format.name(),
+            self.scale,
+            self.features.to_text()
+        )
+    }
+
+    /// Parses the text served at `/scheme/quanta-gpu/info`.
+    ///
+    /// Unknown keys and `#` comments are ignored so the file can grow without
+    /// breaking clients. Every required key must be present exactly in the
+    /// documented spelling.
+    pub fn parse(text: &str) -> Result<Self, InfoError> {
+        let mut version = None;
+        let mut width = None;
+        let mut height = None;
+        let mut stride = None;
+        let mut scale = None;
+        let mut format = None;
+        let mut features = None;
+
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            let key = key.trim();
+            let value = value.trim();
+            match key {
+                "version" => version = Some(parse_info(value, "version")?),
+                "width" => width = Some(parse_info(value, "width")?),
+                "height" => height = Some(parse_info(value, "height")?),
+                "stride" => stride = Some(parse_info(value, "stride")?),
+                "scale" => scale = Some(parse_info(value, "scale")?),
+                "format" => {
+                    format = Some(match value {
+                        Format::ARGB8888_NAME => Format::Argb8888,
+                        _ => return Err(InfoError::UnknownFormat),
+                    })
+                }
+                "features" => features = Some(Features::parse(value)),
+                _ => {}
+            }
+        }
+
+        let info = Self {
+            version: version.ok_or(InfoError::MissingField("version"))?,
+            width: width.ok_or(InfoError::MissingField("width"))?,
+            height: height.ok_or(InfoError::MissingField("height"))?,
+            stride: stride.ok_or(InfoError::MissingField("stride"))?,
+            scale: scale.ok_or(InfoError::MissingField("scale"))?,
+            format: format.ok_or(InfoError::MissingField("format"))?,
+            // Older v0 drivers predate feature advertisement.
+            features: features.unwrap_or(Features::PRESENT),
+        };
+        info.validate()?;
+        Ok(info)
+    }
+}
+
+fn parse_info<T: core::str::FromStr>(value: &str, field: &'static str) -> Result<T, InfoError> {
+    value.parse().map_err(|_| InfoError::InvalidField { field })
+}
+
+/// Errors returned while reading or writing the device description.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InfoError {
+    MissingField(&'static str),
+    MissingFeature(&'static str),
+    InvalidField { field: &'static str },
+    UnknownFormat,
+    UnsupportedVersion(u16),
+    InvalidGeometry,
+}
+
+impl fmt::Display for InfoError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            InfoError::MissingField(field) => write!(f, "device info is missing {field}"),
+            InfoError::MissingFeature(feature) => {
+                write!(f, "device info is missing feature {feature}")
+            }
+            InfoError::InvalidField { field } => write!(f, "invalid device info {field}"),
+            InfoError::UnknownFormat => write!(f, "unknown surface format"),
+            InfoError::UnsupportedVersion(version) => {
+                write!(f, "unsupported protocol version {version}")
+            }
+            InfoError::InvalidGeometry => write!(f, "invalid surface geometry"),
+        }
+    }
+}
+
+impl std::error::Error for InfoError {}
 
 /// Canvas metadata shared by every operation in a frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -124,6 +400,62 @@ impl PixelRect {
             width,
             height,
         }
+    }
+
+    /// Exclusive right edge, saturating instead of wrapping.
+    pub const fn right(self) -> u32 {
+        self.x.saturating_add(self.width)
+    }
+
+    /// Exclusive bottom edge, saturating instead of wrapping.
+    pub const fn bottom(self) -> u32 {
+        self.y.saturating_add(self.height)
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.width == 0 || self.height == 0
+    }
+
+    /// Intersection with another rectangle, or `None` if they do not overlap.
+    pub const fn intersection(self, other: Self) -> Option<Self> {
+        let x = if self.x > other.x { self.x } else { other.x };
+        let y = if self.y > other.y { self.y } else { other.y };
+        let right = if self.right() < other.right() {
+            self.right()
+        } else {
+            other.right()
+        };
+        let bottom = if self.bottom() < other.bottom() {
+            self.bottom()
+        } else {
+            other.bottom()
+        };
+        if x >= right || y >= bottom {
+            None
+        } else {
+            Some(Self::new(x, y, right - x, bottom - y))
+        }
+    }
+
+    /// Clip to a `width` by `height` surface, returning `None` when nothing
+    /// of the rectangle is visible.
+    pub const fn clipped_to(self, width: u32, height: u32) -> Option<Self> {
+        self.intersection(Self::new(0, 0, width, height))
+    }
+
+    /// Smallest rectangle containing both inputs. Empty inputs are ignored.
+    pub fn union(self, other: Self) -> Self {
+        if self.is_empty() {
+            return other;
+        }
+        if other.is_empty() {
+            return self;
+        }
+        let x = self.x.min(other.x);
+        let y = self.y.min(other.y);
+        let right = self.right().max(other.right());
+        let bottom = self.bottom().max(other.bottom());
+        Self::new(x, y, right - x, bottom - y)
     }
 }
 
@@ -226,6 +558,7 @@ pub enum Error {
     DuplicatePresent,
     PresentNotLast,
     TooManyDamage { count: usize },
+    TooManyRecords { count: usize },
     BadAtlas,
     TooLarge { what: &'static str, len: usize },
     TrailingBytes,
@@ -248,6 +581,7 @@ impl fmt::Display for Error {
             Error::DuplicatePresent => write!(f, "frame has more than one Present"),
             Error::PresentNotLast => write!(f, "Present must be the last record"),
             Error::TooManyDamage { count } => write!(f, "too many damage rectangles ({count})"),
+            Error::TooManyRecords { count } => write!(f, "too many records in frame ({count})"),
             Error::BadAtlas => write!(f, "invalid atlas update"),
             Error::TooLarge { what, len } => write!(f, "{what} too large ({len} bytes)"),
             Error::TrailingBytes => write!(f, "trailing bytes after Present"),
@@ -486,7 +820,9 @@ impl FrameEncoder {
             return Err(Error::MissingPresent);
         }
         if self.buf.len() > MAX_FRAME_LEN {
-            return Err(Error::FrameTooLarge { len: self.buf.len() });
+            return Err(Error::FrameTooLarge {
+                len: self.buf.len(),
+            });
         }
         let command_len = (self.buf.len() - HEADER_LEN) as u32;
         self.buf[28..32].copy_from_slice(&command_len.to_le_bytes());
@@ -522,12 +858,15 @@ impl FrameEncoder {
     }
 }
 
-/// Decodes a frame, calling `sink` for every operation in order.
+/// Reads and validates the frame header without replaying any records.
 ///
-/// The frame is validated completely before any operation is handed to the
-/// sink. This is important for drivers: a malformed frame must not leave the
-/// scanout half-updated (callers can also validate into a null sink first).
-pub fn decode_frame<F: FrameSink>(bytes: &[u8], sink: &mut F) -> Result<FrameInfo, Error> {
+/// Drivers use this to reject a frame (wrong size, stale sequence, wrong
+/// surface) *before* executing draw operations against the scanout.
+pub fn peek_frame_info(bytes: &[u8]) -> Result<FrameInfo, Error> {
+    parse_header(bytes).map(|(info, _)| info)
+}
+
+fn parse_header(bytes: &[u8]) -> Result<(FrameInfo, usize), Error> {
     if bytes.len() < HEADER_LEN {
         return Err(Error::Truncated);
     }
@@ -557,13 +896,24 @@ pub fn decode_frame<F: FrameSink>(bytes: &[u8], sink: &mut F) -> Result<FrameInf
     if flags != 0 {
         return Err(Error::BadHeader);
     }
+    if command_len != bytes.len() - HEADER_LEN {
+        return Err(if command_len > bytes.len() - HEADER_LEN {
+            Error::Truncated
+        } else {
+            Error::BadHeader
+        });
+    }
+    Ok((info, command_len))
+}
+
+/// Decodes a frame, calling `sink` for every operation in order.
+///
+/// The frame is validated completely before any operation is handed to the
+/// sink. This is important for drivers: a malformed frame must not leave the
+/// scanout half-updated.
+pub fn decode_frame<F: FrameSink>(bytes: &[u8], sink: &mut F) -> Result<FrameInfo, Error> {
+    let (info, _) = parse_header(bytes)?;
     let commands = &bytes[HEADER_LEN..];
-    if command_len > commands.len() {
-        return Err(Error::Truncated);
-    }
-    if command_len != commands.len() {
-        return Err(Error::BadHeader);
-    }
 
     // Decode once into a validating sink, then replay to the real sink. This
     // keeps the "atomic frame" rule for callers that cannot roll back.
@@ -687,9 +1037,14 @@ struct DecodeState {
 fn decode_records<F: FrameSink>(commands: &[u8], sink: &mut F) -> Result<DecodeState, Error> {
     let mut state = DecodeState::default();
     let mut offset = 0usize;
+    let mut records = 0usize;
     while offset < commands.len() {
         if state.present {
             return Err(Error::TrailingBytes);
+        }
+        records += 1;
+        if records > MAX_RECORDS {
+            return Err(Error::TooManyRecords { count: records });
         }
         if commands.len() - offset < 8 {
             return Err(Error::Truncated);
@@ -783,7 +1138,7 @@ fn decode_records<F: FrameSink>(commands: &[u8], sink: &mut F) -> Result<DecodeS
                     border_width,
                     fill: read_rgba(&payload[24..28]),
                     border: read_rgba(&payload[28..32]),
-                    clip: read_clip(&payload[32..52])?,
+                    clip: read_clip(&payload[32..52], op)?,
                 };
                 cmd.rect.validate()?;
                 validate_clip(cmd.clip)?;
@@ -800,7 +1155,7 @@ fn decode_records<F: FrameSink>(commands: &[u8], sink: &mut F) -> Result<DecodeS
                     offset_x: read_f32(&payload[24..28])?,
                     offset_y: read_f32(&payload[28..32])?,
                     color: read_rgba(&payload[32..36]),
-                    clip: read_clip(&payload[36..56])?,
+                    clip: read_clip(&payload[36..56], op)?,
                 };
                 cmd.rect.validate()?;
                 if !finite_non_negative(cmd.radius) || !finite_non_negative(cmd.blur) {
@@ -823,7 +1178,7 @@ fn decode_records<F: FrameSink>(commands: &[u8], sink: &mut F) -> Result<DecodeS
                     rect: read_float_rect(&payload[0..16])?,
                     uv,
                     color: read_rgba(&payload[32..36]),
-                    clip: read_clip(&payload[36..56])?,
+                    clip: read_clip(&payload[36..56], op)?,
                 };
                 cmd.rect.validate()?;
                 validate_clip(cmd.clip)?;
@@ -833,9 +1188,7 @@ fn decode_records<F: FrameSink>(commands: &[u8], sink: &mut F) -> Result<DecodeS
                 if len < 28 {
                     return Err(Error::BadPayload { op });
                 }
-                let field = |at: usize| {
-                    u32::from_le_bytes(payload[at..at + 4].try_into().unwrap())
-                };
+                let field = |at: usize| u32::from_le_bytes(payload[at..at + 4].try_into().unwrap());
                 let atlas_width = field(0);
                 let atlas_height = field(4);
                 let rect = PixelRect::new(field(8), field(12), field(16), field(20));
@@ -854,8 +1207,14 @@ fn decode_records<F: FrameSink>(commands: &[u8], sink: &mut F) -> Result<DecodeS
                     || atlas_height == 0
                     || rect.width == 0
                     || rect.height == 0
-                    || rect.x.checked_add(rect.width).is_none_or(|v| v > atlas_width)
-                    || rect.y.checked_add(rect.height).is_none_or(|v| v > atlas_height)
+                    || rect
+                        .x
+                        .checked_add(rect.width)
+                        .is_none_or(|v| v > atlas_width)
+                    || rect
+                        .y
+                        .checked_add(rect.height)
+                        .is_none_or(|v| v > atlas_height)
                     || (rect.width as usize).checked_mul(rect.height as usize) != Some(data_len)
                 {
                     return Err(Error::BadAtlas);
@@ -909,10 +1268,7 @@ fn read_rgba(input: &[u8]) -> Rgba8 {
 }
 
 fn write_float_rect(out: &mut [u8], rect: FloatRect) {
-    for (index, value) in [rect.x, rect.y, rect.width, rect.height]
-        .iter()
-        .enumerate()
-    {
+    for (index, value) in [rect.x, rect.y, rect.width, rect.height].iter().enumerate() {
         out[index * 4..index * 4 + 4].copy_from_slice(&value.to_bits().to_le_bytes());
     }
 }
@@ -941,11 +1297,11 @@ fn write_clip(out: &mut [u8], clip: Option<FloatRect>) -> Result<(), Error> {
     Ok(())
 }
 
-fn read_clip(input: &[u8]) -> Result<Option<FloatRect>, Error> {
+fn read_clip(input: &[u8], op: u16) -> Result<Option<FloatRect>, Error> {
     match input[0] {
         0 => Ok(None),
         1 => Ok(Some(read_float_rect(&input[4..20])?)),
-        _ => Err(Error::BadPayload { op: OP_RECT }),
+        _ => Err(Error::BadPayload { op }),
     }
 }
 
@@ -982,11 +1338,16 @@ mod tests {
             self.ops.push(format!("glyph {:?}", cmd.rect));
         }
         fn atlas(&mut self, cmd: &AtlasCmd<'_>) {
-            self.ops
-                .push(format!("atlas {}x{} data={}", cmd.rect.width, cmd.rect.height, cmd.data.len()));
+            self.ops.push(format!(
+                "atlas {}x{} data={}",
+                cmd.rect.width,
+                cmd.rect.height,
+                cmd.data.len()
+            ));
         }
         fn submit(&mut self, backend: u32, data: &[u8]) {
-            self.ops.push(format!("submit {backend} data={}", data.len()));
+            self.ops
+                .push(format!("submit {backend} data={}", data.len()));
         }
         fn set_cursor(&mut self, cmd: &CursorCmd) {
             self.ops.push(format!("cursor {cmd:?}"));
@@ -1141,10 +1502,7 @@ mod tests {
     fn duplicate_present_cannot_be_encoded() {
         let mut encoder = FrameEncoder::new(info()).unwrap();
         encoder.present(&[]).unwrap();
-        assert!(matches!(
-            encoder.present(&[]),
-            Err(Error::PresentNotLast)
-        ));
+        assert!(matches!(encoder.present(&[]), Err(Error::PresentNotLast)));
     }
 
     #[test]
@@ -1262,6 +1620,213 @@ mod tests {
         let mut sink = Sink::default();
         decode_frame(&bytes, &mut sink).unwrap();
         assert_eq!(sink.ops, ["atlas 2x2 data=4", "present 0"]);
+    }
+
+    #[test]
+    fn device_info_round_trips() {
+        let info = DeviceInfo::new(
+            0,
+            800,
+            600,
+            3200,
+            1.25,
+            Format::Argb8888,
+            Features::PRESENT.union(Features::RENDER),
+        )
+        .unwrap();
+        let text = info.to_text();
+        assert!(text.contains("version=0\n"));
+        assert!(text.contains("format=argb8888\n"));
+        assert!(text.contains("features=present,render\n"));
+        assert_eq!(DeviceInfo::parse(&text), Ok(info));
+    }
+
+    #[test]
+    fn device_info_ignores_comments_and_unknown_keys() {
+        let text = "# generated\nversion=0\nwidth=64\nheight=32\nstride=256\n\
+                    format=argb8888\nscale=2\nfeatures=present,render,future\nfuture_key=1\n";
+        let info = DeviceInfo::parse(text).unwrap();
+        assert_eq!(info.width, 64);
+        assert_eq!(info.height, 32);
+        assert_eq!(info.stride, 256);
+        assert_eq!(info.scale, 2.0);
+        assert_eq!(info.format, Format::Argb8888);
+        assert!(info.features.contains(Features::RENDER));
+        assert!(!info.features.contains(Features::SUBMIT));
+    }
+
+    #[test]
+    fn device_info_rejects_bad_fields() {
+        let base = "version=0\nwidth=64\nheight=32\nstride=256\nformat=argb8888\nscale=1\n";
+        assert_eq!(
+            DeviceInfo::parse(base),
+            Ok(DeviceInfo::new(0, 64, 32, 256, 1.0, Format::Argb8888, Features::PRESENT,).unwrap())
+        );
+
+        let missing = base.replace("stride=256\n", "");
+        assert_eq!(
+            DeviceInfo::parse(&missing),
+            Err(InfoError::MissingField("stride"))
+        );
+
+        let bad_format = base.replace("argb8888", "rgb565");
+        assert_eq!(
+            DeviceInfo::parse(&bad_format),
+            Err(InfoError::UnknownFormat)
+        );
+
+        let narrow = base.replace("stride=256", "stride=32");
+        assert_eq!(DeviceInfo::parse(&narrow), Err(InfoError::InvalidGeometry));
+
+        let version = base.replace("version=0", "version=9");
+        assert_eq!(
+            DeviceInfo::parse(&version),
+            Err(InfoError::UnsupportedVersion(9))
+        );
+
+        let scale = base.replace("scale=1", "scale=NaN");
+        assert_eq!(DeviceInfo::parse(&scale), Err(InfoError::InvalidGeometry));
+
+        let no_present = base.replace("scale=1", "scale=1\nfeatures=render");
+        assert_eq!(
+            DeviceInfo::parse(&no_present),
+            Err(InfoError::MissingFeature("present"))
+        );
+    }
+
+    #[test]
+    fn pixel_rect_helpers_clip_and_merge() {
+        let rect = PixelRect::new(10, 20, 30, 40);
+        assert_eq!(rect.right(), 40);
+        assert_eq!(rect.bottom(), 60);
+        assert!(!rect.is_empty());
+        assert_eq!(
+            rect.clipped_to(20, 30),
+            Some(PixelRect::new(10, 20, 10, 10))
+        );
+        assert_eq!(rect.clipped_to(5, 5), None);
+        assert_eq!(PixelRect::new(1, 1, 0, 4).clipped_to(100, 100), None);
+        assert_eq!(
+            PixelRect::new(0, 0, 10, 10).intersection(PixelRect::new(5, 5, 10, 10)),
+            Some(PixelRect::new(5, 5, 5, 5))
+        );
+        assert_eq!(
+            PixelRect::new(0, 0, 10, 10).intersection(PixelRect::new(10, 10, 5, 5)),
+            None
+        );
+        assert_eq!(
+            PixelRect::new(0, 0, 10, 10).union(PixelRect::new(20, 20, 5, 5)),
+            PixelRect::new(0, 0, 25, 25)
+        );
+        assert_eq!(
+            PixelRect::default().union(PixelRect::new(3, 4, 5, 6)),
+            PixelRect::new(3, 4, 5, 6)
+        );
+    }
+
+    #[test]
+    fn malformed_clip_kind_reports_the_opcode() {
+        let mut encoder = FrameEncoder::new(info()).unwrap();
+        encoder.rect(&sample_rect()).unwrap().present(&[]).unwrap();
+        let mut bytes = encoder.finish().unwrap();
+        // Header (40) + record header (8) + payload offset 32 = clip tag.
+        bytes[80] = 2;
+        assert_eq!(
+            decode_frame(&bytes, &mut Sink::default()),
+            Err(Error::BadPayload { op: OP_RECT })
+        );
+
+        let mut encoder = FrameEncoder::new(info()).unwrap();
+        encoder
+            .shadow(&sample_shadow())
+            .unwrap()
+            .present(&[])
+            .unwrap();
+        let mut bytes = encoder.finish().unwrap();
+        // Header (40) + record header (8) + payload offset 36 = clip tag.
+        bytes[84] = 2;
+        assert_eq!(
+            decode_frame(&bytes, &mut Sink::default()),
+            Err(Error::BadPayload { op: OP_SHADOW })
+        );
+
+        let mut encoder = FrameEncoder::new(info()).unwrap();
+        encoder
+            .glyph(&sample_glyph())
+            .unwrap()
+            .present(&[])
+            .unwrap();
+        let mut bytes = encoder.finish().unwrap();
+        bytes[84] = 2;
+        assert_eq!(
+            decode_frame(&bytes, &mut Sink::default()),
+            Err(Error::BadPayload { op: OP_GLYPH })
+        );
+    }
+
+    #[test]
+    fn feature_list_parses_and_ignores_unknown_names() {
+        assert_eq!(
+            Features::parse("present,render"),
+            Features::PRESENT.union(Features::RENDER)
+        );
+        assert_eq!(Features::parse("present,future"), Features::PRESENT);
+        assert_eq!(Features::parse(""), Features::empty());
+        assert_eq!(
+            Features::PRESENT.union(Features::RENDER).to_text(),
+            "present,render"
+        );
+    }
+
+    #[test]
+    fn peek_reads_the_header_without_replaying_records() {
+        let mut encoder = FrameEncoder::new(info()).unwrap();
+        encoder.clear(Rgba8::BLACK).unwrap().present(&[]).unwrap();
+        let bytes = encoder.finish().unwrap();
+
+        assert_eq!(peek_frame_info(&bytes), Ok(info()));
+        assert_eq!(
+            peek_frame_info(&bytes[..HEADER_LEN - 1]),
+            Err(Error::Truncated)
+        );
+
+        // A broken record does not affect header peeking, but decode rejects it.
+        let mut broken = bytes.clone();
+        broken[HEADER_LEN + 2] = 1; // record flags
+        assert_eq!(peek_frame_info(&broken), Ok(info()));
+        assert_eq!(
+            decode_frame(&broken, &mut Sink::default()),
+            Err(Error::BadHeader)
+        );
+    }
+
+    #[test]
+    fn too_many_records_are_rejected() {
+        let mut commands = Vec::new();
+        for _ in 0..=MAX_RECORDS {
+            commands.extend_from_slice(&999u16.to_le_bytes()); // unknown op
+            commands.extend_from_slice(&0u16.to_le_bytes());
+            commands.extend_from_slice(&0u32.to_le_bytes());
+        }
+        commands.extend_from_slice(&OP_PRESENT.to_le_bytes());
+        commands.extend_from_slice(&0u16.to_le_bytes());
+        commands.extend_from_slice(&4u32.to_le_bytes());
+        commands.extend_from_slice(&0u32.to_le_bytes());
+
+        let mut bytes = vec![0u8; HEADER_LEN];
+        bytes[..4].copy_from_slice(&MAGIC);
+        bytes[4..6].copy_from_slice(&VERSION.to_le_bytes());
+        bytes[6..8].copy_from_slice(&(HEADER_LEN as u16).to_le_bytes());
+        bytes[16..20].copy_from_slice(&1u32.to_le_bytes());
+        bytes[20..24].copy_from_slice(&1u32.to_le_bytes());
+        bytes[24..28].copy_from_slice(&1.0f32.to_bits().to_le_bytes());
+        bytes[28..32].copy_from_slice(&(commands.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&commands);
+
+        assert!(matches!(
+            decode_frame(&bytes, &mut Sink::default()),
+            Err(Error::TooManyRecords { .. })
+        ));
     }
 
     #[test]

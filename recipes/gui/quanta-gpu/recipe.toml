@@ -1,0 +1,26 @@
+[package]
+description = "Pure-Rust QuantaGPU display service and v0 present-path demo"
+
+# Local source tree. Switch to a git source once the QuantaGPU implementation
+# is pushed to the project repository.
+[source]
+path = "/run/media/shxu/datalinux/redox/quanta-gpu"
+
+[build]
+template = "custom"
+script = """
+DYNAMIC_INIT
+cookbook_cargo_packages quanta-gpud quanta-demo
+
+# Register the display scheme with init. The daemon opens a VT display handle
+# and serves /scheme/quanta-gpu; the test image starts quanta-demo on top.
+mkdir -pv "${COOKBOOK_STAGE}/usr/lib/init.d"
+cat > "${COOKBOOK_STAGE}/usr/lib/init.d/20_quanta-gpud.service" <<'SERVICE'
+[unit]
+description = "QuantaGPU display service"
+
+[service]
+cmd = "quanta-gpud"
+type = { scheme = "quanta-gpu" }
+SERVICE
+"""

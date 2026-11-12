@@ -1,0 +1,15 @@
+[package]
+name = "quanta-gpud"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "QuantaGPU display service for Redox (virtio-gpu 2D present path)"
+
+[dependencies]
+quanta-gpu-protocol.workspace = true
+quanta-gpu-raster.workspace = true
+libredox.workspace = true
+redox-scheme.workspace = true
+redox_syscall.workspace = true
+drm.workspace = true
+anyhow.workspace = true
