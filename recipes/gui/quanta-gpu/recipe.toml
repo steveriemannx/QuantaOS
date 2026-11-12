@@ -4,7 +4,7 @@ description = "Pure-Rust QuantaGPU display service, desktop and terminal"
 # Local source tree. Switch to a git source once the QuantaGPU implementation
 # is pushed to the project repository.
 [source]
-path = "/run/media/shxu/datalinux/redox/quanta-gpu"
+path = "quanta-gpu"
 
 [build]
 template = "custom"
