@@ -27,3 +27,6 @@ wget-log
 
 # Workspace-local Rust target installation (read-only host $HOME)
 /.rustup/
+
+# Workspace-local Cargo home (host $HOME is read-only)
+/.cargo-home/

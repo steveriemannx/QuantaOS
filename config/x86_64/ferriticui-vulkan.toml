@@ -1,0 +1,38 @@
+# FerriticUI on Mesa/lavapipe: the Orbital desktop plus the FerriticUI demo
+# built with its blade (Vulkan) backend. The counter can then be started as
+# `FERRITIC_RENDERER=blade ferritic-demo` (or through the
+# "FerriticUI Counter (Vulkan)" launcher entry) and is rendered offscreen by
+# lava pipe, then copied into the Orbital window.
+
+include = ["../desktop-minimal.toml", "../server.toml"]
+
+[general]
+filesystem_size = 1024
+
+[packages]
+libdrm = "binary"
+llvm21 = "binary"
+mesa = "binary"
+libvulkan = {}
+dejavu = {}
+ferriticui = {}
+file = {}
+freefont = {}
+hicolor-icon-theme = {}
+installer-gui = {}
+netsurf = {}
+patchelf = {}
+pop-icon-theme = {}
+shared-mime-info = {}
+# orbterm from desktop-minimal is not in the cached package repo
+orbterm = "ignore"
+
+# Start the Vulkan-rendered counter automatically on the Orbital VT so the
+# demo is visible without a launcher click. The wrapper forces
+# FERRITIC_RENDERER=blade and retries window creation while Orbital starts.
+[[files]]
+path = "/usr/lib/init.d/40_ferritic_gpu_demo"
+data = """
+requires_weak 20_orbital
+nowait /usr/bin/ferritic-demo-gpu
+"""

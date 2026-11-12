@@ -1,0 +1,17 @@
+[package]
+description = "Headless ferritic-blade render test (Vulkan loader + lavapipe)"
+
+[source]
+path = "/run/media/shxu/datalinux/ferriticui-redox-src"
+
+[build]
+template = "custom"
+# Runtime: ash opens the loader with dlopen(); the ICD comes from mesa.
+dependencies = [
+    "libvulkan",
+]
+script = """
+DYNAMIC_INIT
+
+cookbook_cargo_packages ferritic-blade-snapshot
+"""

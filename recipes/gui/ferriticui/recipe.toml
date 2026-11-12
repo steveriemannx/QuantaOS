@@ -10,7 +10,25 @@ path = "/run/media/shxu/datalinux/ferriticui-redox-src"
 template = "custom"
 script = """
 DYNAMIC_INIT
-cookbook_cargo_packages ferritic-demo ferritic-term
+cookbook_cargo_packages ferritic-term
+
+# The demo is also built with the `blade` feature so it can render through
+# ferritic-blade (Mesa/lavapipe on Redox); ferritic-soft stays the fallback and
+# the default unless FERRITIC_RENDERER=blade is set at run time.
+COOKBOOK_CARGO_FLAGS+=(--features blade)
+cookbook_cargo_packages ferritic-demo
+COOKBOOK_CARGO_FLAGS=()
+
+# Wrapper that forces the Vulkan renderer for the launcher entry.
+cat > "${COOKBOOK_STAGE}/usr/bin/ferritic-demo-gpu" <<'ENTRY'
+#!/bin/sh
+# Render with ferritic-blade (Vulkan, Mesa/lavapipe when no GPU driver exists).
+# Falls back to ferritic-soft when the Vulkan device cannot be created.
+FERRITIC_RENDERER=blade \
+FERRITIC_WINDOW_RETRY_MS="${FERRITIC_WINDOW_RETRY_MS:-15000}" \
+    exec /usr/bin/ferritic-demo "$@"
+ENTRY
+chmod 755 "${COOKBOOK_STAGE}/usr/bin/ferritic-demo-gpu"
 
 # Register the apps with the Orbital launcher (/usr/share/ui/apps entries).
 mkdir -pv "${COOKBOOK_STAGE}/usr/share/icons/apps" "${COOKBOOK_STAGE}/usr/share/ui/apps"
@@ -30,6 +48,13 @@ icon=/usr/share/icons/apps/ferriticui.png
 author=QuantaOS
 description=Static retained-mode UI demo rendered by ferritic-soft
 ENTRY
+cat > "${COOKBOOK_STAGE}/usr/share/ui/apps/66_ferriticui_gpu" <<'ENTRY'
+name=FerriticUI Counter (Vulkan)
+binary=/usr/bin/ferritic-demo-gpu
+icon=/usr/share/icons/apps/ferriticui.png
+author=QuantaOS
+description=Counter demo rendered by ferritic-blade through Mesa/lavapipe
+ENTRY
 
 # Freedesktop entries for file associations and other launchers.
 mkdir -pv "${COOKBOOK_STAGE}/usr/share/applications"
@@ -48,6 +73,16 @@ cat > "${COOKBOOK_STAGE}/usr/share/applications/ferriticui.desktop" <<'ENTRY'
 Name=FerriticUI Counter
 Comment=Static retained-mode UI demo rendered by ferritic-soft
 Exec=ferritic-demo
+Icon=/usr/share/icons/apps/ferriticui.png
+Terminal=false
+Type=Application
+Categories=Utility;
+ENTRY
+cat > "${COOKBOOK_STAGE}/usr/share/applications/ferriticui-gpu.desktop" <<'ENTRY'
+[Desktop Entry]
+Name=FerriticUI Counter (Vulkan)
+Comment=Counter demo rendered by ferritic-blade through Mesa/lavapipe
+Exec=ferritic-demo-gpu
 Icon=/usr/share/icons/apps/ferriticui.png
 Terminal=false
 Type=Application
