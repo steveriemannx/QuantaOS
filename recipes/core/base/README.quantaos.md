@@ -25,19 +25,8 @@ patch -d base -p1 < recipes/core/base/patches/0001-virtio-gpud-virgl.patch
 patch -d base -p1 < recipes/core/base/patches/0002-quanta-gpud-prototype.patch
 ```
 
-To build base from upstream in a networked checkout, the recipe source can be
-switched to:
-
-```toml
-[source]
-git = "https://gitlab.redox-os.org/redox-os/base.git"
-rev = "7d40d29b0110f1fa1ebeaa02e2e7977ac648f58f"
-patches = [
-    "patches/0001-virtio-gpud-virgl.patch",
-    "patches/0002-quanta-gpud-prototype.patch",
-]
-```
-
-The local offline build instead uses `[source] path` pointing at a base
-checkout that already contains the commits. `COOKBOOK_OFFLINE=1` does not
-apply patch files for git sources, so the path form is kept for this host.
+The recipe now pins upstream `7d40d29b0110f1fa1ebeaa02e2e7977ac648f58f` and
+lists these patches under `[source]`; cookbook applies them after checkout.
+For offline development, point `[source] path` at a base checkout that already
+contains the changes instead, since `COOKBOOK_OFFLINE=1` does not apply patches
+for git sources.

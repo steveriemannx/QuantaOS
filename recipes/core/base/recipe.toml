@@ -2,7 +2,12 @@
 description = "Essential system components and drivers for Redox"
 
 [source]
-path = "/run/media/shxu/datalinux/scratch/base"
+git = "https://gitlab.redox-os.org/redox-os/base.git"
+rev = "7d40d29b0110f1fa1ebeaa02e2e7977ac648f58f"
+patches = [
+  "patches/0001-virtio-gpud-virgl.patch",
+  "patches/0002-quanta-gpud-prototype.patch",
+]
 
 [build]
 template = "custom"
