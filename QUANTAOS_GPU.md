@@ -7,10 +7,13 @@ general-purpose GPU stack: exactly one simple device, one scanout, one client mo
 This document is the design baseline. It is deliberately narrower than Vulkan/DRM.
 
 Status (2026-11-12): the v0 present path and the v1 pure-Rust render path are
-implemented. `quanta-gpud` executes `Clear`/`Rect`/`Shadow`/`Glyph`/`Atlas`
-records with `quanta-gpu-raster` (SDF rasterizer, no C, no Vulkan), and the
-driver advertises that through the `render` feature in `info`. The virgl
-executor is still optional and not required for a working image.
+implemented, and the v1 image now boots in QEMU: `quanta-demo` reads the device
+description, maps the surface, submits `Clear`/`Rect`/`Shadow`/`Glyph`/`Atlas`
+records, and `quanta-gpud` executes them with `quanta-gpu-raster` (SDF
+rasterizer, no C, no Vulkan). A QEMU screendump of the 1280x800 virtio-gpu
+scanout shows the four coloured quadrants, the bordered panel, the `QUANTA`
+glyph row and the moving bar; the glyphs match the atlas bitmap exactly.
+The virgl executor is still optional and not required for a working image.
 
 ## 1. What "pure Rust GPU protocol" means here
 
@@ -207,7 +210,7 @@ also the largest work item; it is *not* required for an all-Rust image.
 | Phase | Deliverable | GPU renders? | Verifiable here? |
 |---|---|---|---|
 | v0 | protocol crate + `quanta-gpud` 2D + `ferritic-quanta` + fullscreen demo | no (scanout only) | yes, QEMU `gpu=virtio` + screendump |
-| v1s | `quanta-gpu-raster` executes Clear/Rect/Shadow/Glyph/Atlas in `quanta-gpud`; client `frame()` API; `quanta-demo` renders the scene with protocol records | no (driver CPU, GPU-shaped commands) | yes, host tests + QEMU |
+| v1s | `quanta-gpu-raster` executes Clear/Rect/Shadow/Glyph/Atlas in `quanta-gpud`; client `frame()` API; `quanta-demo` renders the scene with protocol records | no (driver CPU, GPU-shaped commands) | **yes, verified** (host tests + QEMU screendump) |
 | v1a | virgl driver bring-up: clear screen via a Rust virgl command buffer | yes | requires host virglrenderer; installable (247 KB) |
 | v1b | SDF/glyph shaders + draw commands; FerriticUI on GPU | yes | host virglrenderer + NVIDIA/EGL |
 | v2 | input/window model (multiple surfaces or Orbital integration) | — | QEMU |
@@ -222,6 +225,51 @@ also the largest work item; it is *not* required for an all-Rust image.
   the framebuffer via the QEMU monitor (`screendump`) and compare the two paths.
 * v1 virgl: a Rust guest test that submits a minimal virgl clear/draw and
   verifies the screendump; then the Ferritic SDF/glyph golden set.
+
+### QEMU verification (implemented)
+
+The host test is [`quanta-gpu/scripts/qemu-test.py`](quanta-gpu/scripts/qemu-test.py).
+It boots `build/x86_64/quanta-gpu/harddrive.img` with OVMF + `virtio-vga`,
+`-display none`, and a QEMU monitor/serial socket pair, then verifies the
+screendump with Pillow:
+
+```sh
+python3 quanta-gpu/scripts/qemu-test.py
+```
+
+Two non-obvious boot/protocol requirements were found while bringing this up:
+
+* **UEFI, not SeaBIOS.** The image is assembled with the UEFI bootloader. With
+  SeaBIOS the boot stops on a 720x400 text screen; `-bios .../ovmf/OVMF.fd`
+  (or an equivalent pflash setup) reaches the Redox kernel and the
+  virtio-gpu scanout.
+* **The scheme must implement `fstat`/`getdents`, and `ctl` must not be
+  `POSITIONED`.** The VFS calls `fstat` on every opened scheme path: without it
+  `cat /scheme/quanta-gpu/info` fails with `EOPNOTSUPP` and clients see an
+  empty device description. `ctl` is a message stream: if the kernel advances
+  a file position, the second frame write arrives at a non-zero offset and is
+  rejected with `EINVAL`, freezing the demo on its first frame. `fb`/`ctl` are
+  therefore non-positioned and the driver ignores the stream offset. The client
+  also opens `ctl` `O_NONBLOCK`, as `read_fence` is specified to report
+  `WouldBlock` rather than sleep.
+* **VT ownership is a race with the console handoff.** `fbcond` can activate
+  the console VT after `quanta-gpud` has opened the display. The driver claims
+  the VT back before the first `Present`; doing it after the flush can deadlock
+  because the scanout flush itself waits for the display. Keep the headless
+  test's serial console drained: the demo and driver log there and a full
+  console buffer must not back-pressure the renderer.
+
+Verified results on 2026-11-12: `info` reports version 0, 1280x800, stride
+5120, `argb8888`, features `present,render`; `ls -l /scheme/quanta-gpu` lists
+`ctl`, `fb`, `info`; the screendump has the four exact quadrant colours, the
+panel fill/border, a 64-pixel yellow bar that advances between captures, and a
+100% glyph-bitmap match for the six 8x8 glyphs.
+
+Safety note for automation: the DSH harness on this host crashes its host
+process when asked to decode/display an image with its Electron-incompatible
+`sharp` build. The test keeps every screenshot as a PPM/PNG on disk and only
+prints colour/geometry statistics; do not feed the captured image back through
+an image tool in that environment.
 
 ## 7. Open decision
 

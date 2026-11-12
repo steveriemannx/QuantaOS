@@ -33,6 +33,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::OpenOptionsExt;
 use std::ptr;
 
 use libredox::{call, flag};
@@ -72,7 +73,15 @@ impl Connection {
             .ok_or_else(|| invalid("surface size overflows usize"))?;
 
         let fb = OpenOptions::new().read(true).write(true).open(FB_PATH)?;
-        let ctl = OpenOptions::new().read(true).write(true).open(CTL_PATH)?;
+        // Fences are opportunistic: `read_fence` reports `WouldBlock` when the
+        // queue is empty, which requires a non-blocking control file.  A
+        // blocking `read` here would stall the caller as soon as it caught up
+        // with the driver.
+        let ctl = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(flag::O_NONBLOCK as i32)
+            .open(CTL_PATH)?;
 
         let map = unsafe {
             call::mmap(call::MmapArgs {

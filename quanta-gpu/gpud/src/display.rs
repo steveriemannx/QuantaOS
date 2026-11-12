@@ -174,7 +174,7 @@ impl Display {
         // The first frame is a black screen, but still make sure the scanout
         // is initialised since some hosts show uninitialised memory otherwise.
         display.flush_full()?;
-        display.activate_vt();
+        display.activate();
         Ok(display)
     }
 
@@ -282,6 +282,20 @@ impl Display {
     }
 
     fn flush_full(&mut self) -> Result<()> {
+        // Initialise the scanout from the (zeroed) client surface. Dirtying
+        // the framebuffer alone would leave whatever the host had in the dumb
+        // buffer visible until the first client frame arrives.
+        let buffer_pitch = self.buffer.pitch() as usize;
+        let row_bytes = self.width as usize * 4;
+        for row in 0..self.height as usize {
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    self.back.add(row * self.pitch as usize),
+                    self.mapping.as_mut_ptr().add(row * buffer_pitch),
+                    row_bytes,
+                );
+            }
+        }
         self.dev
             .dirty_framebuffer(
                 self.fb,
@@ -290,15 +304,29 @@ impl Display {
             .map_err(|err| anyhow!("initial framebuffer flush: {err:?}"))
     }
 
+    /// Re-asserts this surface's VT as the active one.
+    ///
+    /// `open` activates the VT, but the console handoff can complete afterwards
+    /// and take the display back. The driver calls this again before the first
+    /// present so a client drawing after the handoff is actually visible.
+    pub fn activate(&mut self) -> bool {
+        self.activate_vt()
+    }
+
     /// Makes our VT the active one, like `orbital` does with `inputd -A`.
-    fn activate_vt(&mut self) {
+    fn activate_vt(&mut self) -> bool {
         match self.vt_id() {
-            Ok(vt) => {
-                if let Err(err) = activate_vt(vt) {
+            Ok(vt) => match activate_vt(vt) {
+                Ok(()) => true,
+                Err(err) => {
                     eprintln!("quanta-gpud: could not activate VT {vt}: {err}");
+                    false
                 }
+            },
+            Err(err) => {
+                eprintln!("quanta-gpud: could not determine VT id: {err}");
+                false
             }
-            Err(err) => eprintln!("quanta-gpud: could not determine VT id: {err}"),
         }
     }
 

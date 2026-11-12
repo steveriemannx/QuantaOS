@@ -119,8 +119,12 @@ fence acknowledgements; `quanta-gpu-raster`, a pure-Rust SDF executor for the v1
 `Clear`/`Rect`/`Shadow`/`Glyph`/`Atlas` records; `quanta-gpud` executing those
 records and flipping the virtio-gpu 2D scanout; the client `frame()` API; and a
 `quanta-demo` with `--v1` (driver executes protocol records) and `--surface`
-(client rasterizes) modes. Next: boot the `quanta-gpu` test image in QEMU and
-wire `ferritic-quanta` to the client. virgl stays optional and later.
+(client rasterizes) modes. **The image boots in QEMU** (UEFI + virtio-vga,
+headless) and the v1 demo is verified from the scanout: quadrants, panel,
+moving bar and a 100% match for the `QUANTA` glyphs; see
+`quanta-gpu/scripts/qemu-test.py`. Next: wire `ferritic-quanta` to the client,
+then compare `--v1` and `--surface` on the same scene. virgl stays optional and
+later.
 
 ## Environment notes
 

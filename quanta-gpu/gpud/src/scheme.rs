@@ -6,13 +6,56 @@ use quanta_gpu_protocol::{decode_frame, peek_frame_info, DeviceInfo, Features, F
 use quanta_gpu_raster::{Executor, Rasterizer, Surface};
 use redox_scheme::scheme::SchemeSync;
 use redox_scheme::{CallerCtx, OpenResult};
+use syscall::data::{Stat, StatVfs};
+use syscall::dirent::{DirEntry, DirentBuf, DirentKind};
+use syscall::flag::{MODE_DIR, MODE_FILE};
 use syscall::schemev2::NewFdFlags;
-use syscall::{Error, Result, EACCES, EBADF, EINVAL, EIO, EISDIR, ENOENT, EWOULDBLOCK};
+use syscall::{Error, Result, EACCES, EBADF, EINVAL, EIO, EISDIR, ENOENT, ENOTDIR, EWOULDBLOCK};
 
 use crate::display::Display;
 
 /// Keep the per-client fence queue bounded if nobody reads it.
 const MAX_PENDING_FENCES: usize = 64;
+
+/// Record why a frame was rejected. The first few go to `/tmp` so a headless
+/// QEMU test can read them over the serial console; after that we stay quiet
+/// to avoid filling the filesystem with one line per frame.
+fn log_reject(message: &str) {
+    log_bounded(message, false);
+}
+
+/// Record frame traffic for the first few requests. This is cheap, bounded and
+/// only used to diagnose the `ctl` path in QEMU.
+fn log_trace(message: &str) {
+    if std::env::var_os("QUANTA_GPU_TRACE").is_none() {
+        return;
+    }
+    log_bounded(message, true);
+}
+
+fn log_bounded(message: &str, trace: bool) {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static REJECTS: AtomicUsize = AtomicUsize::new(0);
+    static TRACES: AtomicUsize = AtomicUsize::new(0);
+
+    let counter = if trace { &TRACES } else { &REJECTS };
+    let count = counter.fetch_add(1, Ordering::Relaxed);
+    if count >= 32 {
+        return;
+    }
+    if !trace && count == 0 {
+        eprintln!("quanta-gpud: {message}");
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/quanta-gpud.log")
+    {
+        let _ = writeln!(file, "{} {message}", if trace { "trace" } else { "reject" });
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Handle {
@@ -33,6 +76,9 @@ pub struct QuantaScheme {
     rasterizer: Rasterizer,
     /// Completed `Present` sequence numbers (or explicit client tokens).
     fences: VecDeque<u64>,
+    /// Whether the VT has been re-asserted for the first frame after the
+    /// console handoff.
+    activated: bool,
 }
 
 impl QuantaScheme {
@@ -55,6 +101,7 @@ impl QuantaScheme {
             display,
             rasterizer: Rasterizer::new(),
             fences: VecDeque::new(),
+            activated: false,
         };
         scheme.root = scheme.insert(Handle::Root);
         scheme
@@ -112,9 +159,18 @@ impl SchemeSync for QuantaScheme {
         } else {
             self.insert(handle)
         };
+        log_trace(&format!(
+            "open {path:?} flags={_flags:#x} -> handle {number}"
+        ));
         Ok(OpenResult::ThisScheme {
             number,
-            flags: NewFdFlags::empty(),
+            // `info` is a normal positioned regular file. `ctl` is a message
+            // stream: every write is one complete frame and must start at
+            // offset 0, so the kernel must not advance a file position for it.
+            flags: match handle {
+                Handle::Info => NewFdFlags::POSITIONED,
+                _ => NewFdFlags::empty(),
+            },
         })
     }
 
@@ -138,9 +194,8 @@ impl SchemeSync for QuantaScheme {
                 Ok(count)
             }
             Handle::Ctl => {
-                if offset != 0 {
-                    return Err(Error::new(EINVAL));
-                }
+                // `ctl` is a message stream: the fence queue is read from the
+                // front regardless of the kernel-supplied file offset.
                 let Some(token) = self.fences.front().copied() else {
                     return Err(Error::new(EWOULDBLOCK));
                 };
@@ -161,28 +216,28 @@ impl SchemeSync for QuantaScheme {
         &mut self,
         id: usize,
         buf: &[u8],
-        offset: u64,
+        _offset: u64,
         _fcntl_flags: u32,
         _ctx: &CallerCtx,
     ) -> Result<usize> {
         if self.get(id)? != Handle::Ctl {
             return Err(Error::new(EBADF));
         }
-        if offset != 0 {
-            return Err(Error::new(EINVAL));
-        }
+        log_trace(&format!("write fd={id} len={} offset={_offset}", buf.len()));
+        // `ctl` is a message stream. Every write is exactly one complete
+        // frame, so any file offset the kernel may report is irrelevant.
 
         // Validate the header and the surface before executing any draw
         // command. A rejected frame must leave the scanout untouched.
         let info = match peek_frame_info(buf) {
             Ok(info) => info,
             Err(err) => {
-                eprintln!("quanta-gpud: rejecting frame header: {err}");
+                log_reject(&format!("rejecting frame header: {err}"));
                 return Err(Error::new(EINVAL));
             }
         };
         if let Err(err) = self.display.validate_frame(&info) {
-            eprintln!("quanta-gpud: rejecting frame: {err:#}");
+            log_reject(&format!("rejecting frame: {err:#}"));
             return Err(Error::new(EINVAL));
         }
 
@@ -196,26 +251,38 @@ impl SchemeSync for QuantaScheme {
             let surface = match Surface::new(self.display.surface_mut(), width, height, stride) {
                 Ok(surface) => surface,
                 Err(err) => {
-                    eprintln!("quanta-gpud: invalid surface: {err}");
+                    log_reject(&format!("invalid surface: {err}"));
                     return Err(Error::new(EIO));
                 }
             };
             let mut executor = Executor::new(surface, &mut self.rasterizer, scale);
             if let Err(err) = decode_frame(buf, &mut executor) {
-                eprintln!("quanta-gpud: rejecting frame commands: {err}");
+                log_reject(&format!("rejecting frame commands: {err}"));
                 return Err(Error::new(EINVAL));
             }
             executor.finish()
         };
 
+        // The boot console handoff may have run after `Display::open`
+        // activated our VT. Claim the display back *before* the first present:
+        // a scanout flush on an inactive VT can block, which would otherwise
+        // freeze the very frame that was meant to activate it.
+        if !self.activated {
+            self.activated = self.display.activate();
+        }
         if let Err(err) = self.display.present(&info, &executed.damage) {
-            eprintln!("quanta-gpud: present failed: {err:#}");
+            log_reject(&format!("present failed: {err:#}"));
             return Err(Error::new(EIO));
         }
         // Every successful present is acknowledged, even if the client did
         // not ask for a fence, so clients can throttle without inventing
         // their own timing.
         self.queue_fence(executed.fence.unwrap_or(info.seq));
+        log_trace(&format!(
+            "present seq={} damage={}",
+            info.seq,
+            executed.damage.len()
+        ));
         Ok(buf.len())
     }
 
@@ -226,6 +293,53 @@ impl SchemeSync for QuantaScheme {
             Handle::Ctl => Ok(8),
             Handle::Root => Err(Error::new(EISDIR)),
         }
+    }
+
+    // The Redox VFS calls `fstat` before a path can be used as a regular
+    // file. Without it every `open()` of `info`/`ctl` fails with EOPNOTSUPP
+    // and clients such as `fs::read_to_string` see an empty device description.
+    fn fstat(&mut self, id: usize, stat: &mut Stat, _ctx: &CallerCtx) -> Result<()> {
+        let (mode, size) = match self.get(id)? {
+            Handle::Root => (MODE_DIR | 0o755, 0),
+            Handle::Info => (MODE_FILE | 0o444, self.info.len() as u64),
+            Handle::Fb => (MODE_FILE | 0o660, self.display.surface_len() as u64),
+            Handle::Ctl => (MODE_FILE | 0o660, 8),
+        };
+        stat.st_mode = mode;
+        stat.st_size = size;
+        stat.st_nlink = 1;
+        stat.st_blksize = 4096;
+        stat.st_blocks = size.div_ceil(512);
+        Ok(())
+    }
+
+    fn fstatvfs(&mut self, _id: usize, stat: &mut StatVfs, _ctx: &CallerCtx) -> Result<()> {
+        stat.f_bsize = 4096;
+        stat.f_blocks = (self.display.surface_len() as u64).div_ceil(4096);
+        stat.f_bfree = 0;
+        stat.f_bavail = 0;
+        Ok(())
+    }
+
+    fn getdents<'buf>(
+        &mut self,
+        id: usize,
+        mut buf: DirentBuf<&'buf mut [u8]>,
+        opaque_offset: u64,
+    ) -> Result<DirentBuf<&'buf mut [u8]>> {
+        if self.get(id)? != Handle::Root {
+            return Err(Error::new(ENOTDIR));
+        }
+        const ENTRIES: [&str; 3] = ["info", "fb", "ctl"];
+        for (index, name) in ENTRIES.iter().enumerate().skip(opaque_offset as usize) {
+            buf.entry(DirEntry {
+                inode: 0,
+                next_opaque_id: index as u64 + 1,
+                name,
+                kind: DirentKind::Regular,
+            })?;
+        }
+        Ok(buf)
     }
 
     fn fpath(&mut self, id: usize, buf: &mut [u8], _ctx: &CallerCtx) -> Result<usize> {
