@@ -5,7 +5,8 @@ image is entirely Rust and MIT-licensed**.
 
 QuantaOS is its own project repository (`github.com/steveriemannx/QuantaOS`, project
 home and overview); the `quantaos` branch of this fork is its incremental
-implementation.
+implementation. The normative repository and release rules are in
+[`QUANTAOS_REPOSITORY_MODEL.md`](QUANTAOS_REPOSITORY_MODEL.md).
 
 ## Decisions
 
@@ -15,6 +16,7 @@ implementation.
 | GUI toolkit | FerriticUI — new CPU rasterizer + Orbital platform backend (route A) |
 | Compliance scope | package closure of the default desktop image only (`config/desktop.toml` + includes) |
 | Build host | remote Linux, repo on the `datalinux` volume |
+| Repository model | distribution repo + pinned upstream recipes/patches; QuantaOS components may consolidate later |
 
 ## Phase 1 — remove COSMIC/iced (done)
 
